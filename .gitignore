@@ -1,0 +1,53 @@
+﻿# Python virtual environment
+.venv/
+venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Test and analysis cache
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# IDE
+.vscode/
+.idea/
+
+# Operating system
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Argus input media
+Argus/input/*
+!Argus/input/.gitkeep
+
+# Generated output
+Argus/output/artifacts/*
+Argus/output/debug/*
+Argus/output/temp/*
+!Argus/output/artifacts/.gitkeep
+!Argus/output/debug/.gitkeep
+!Argus/output/temp/.gitkeep
+
+# Video and large media files
+*.mov
+*.mp4
+*.m4v
+*.hevc
+*.h265
+*.avi
+*.mkv
+
+# Logs
+*.log
