@@ -1,0 +1,19 @@
+input:
+  directory: input
+
+output:
+  artifacts_directory: output/artifacts
+  debug_directory: output/debug
+  temp_directory: output/temp
+
+sampling:
+  samples_per_second: 5
+
+analysis:
+  black_threshold: 16
+  black_row_mean_threshold: 16
+  black_row_required_ratio: 0.98
+
+report:
+  json_filename: video_report.json
+  markdown_filename: video_report.md
