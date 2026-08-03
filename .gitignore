@@ -36,9 +36,11 @@ Argus/input/*
 Argus/output/artifacts/*
 Argus/output/debug/*
 Argus/output/temp/*
+Argus/output/pages/*
 !Argus/output/artifacts/.gitkeep
 !Argus/output/debug/.gitkeep
 !Argus/output/temp/.gitkeep
+!Argus/output/pages/.gitkeep
 
 # Video and large media files
 *.mov
