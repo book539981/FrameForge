@@ -1,18 +1,20 @@
-﻿# FF — FrameForge
+# FF - FrameForge
 
 FF 是影片教材數位化專案。
 
-目前第一個核心引擎為 Argus。
+目前核心引擎為 Argus。
 
 ## Current Phase
 
-Argus V1：
+Argus V1 / M1：
 
-1. 分析輸入影片
-2. 產生影片分析報告
-3. 根據報告建立穩定頁面切片流程
-4. 後續再接本地 AI 文字辨識
+1. 讀取單一輸入影片
+2. 分析影片 metadata
+3. 依設定抽樣 frame
+4. 計算 frame metrics
+5. 輸出 Video Analyzer JSON report
+6. 輸出 Video Analyzer Markdown report
 
 ## Engines
 
-- Argus：影片分析、穩定頁面辨識、影格選取與頁面去重
+- Argus：M1 Video Analyzer

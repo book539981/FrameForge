@@ -3,30 +3,15 @@ input:
 
 output:
   artifacts_directory: output/artifacts
-  debug_directory: output/debug
-  temp_directory: output/temp
-  pages_directory: output/pages
 
 sampling:
-  frame_interval: 1
+  samples_per_second: 5
 
-stable_frame:
-  ssim_minimum: 0.85
-  adjacent_difference_maximum: 0.008
-  lookback_seconds: 0.20
-  lookback_difference_maximum: 0.008
-  anchor_difference_maximum: 0.015
-  motion_difference_threshold: 0.020
-  motion_minimum_duration_seconds: 0.15
-  minimum_stable_duration_seconds: 2.00
-  fail_tolerance_seconds: 0.50
-  best_frame_exclusion_seconds: 0.60
-  decision_metrics:
-    - adjacent_difference_score
-    - lookback_difference_score
-    - anchor_difference_score
-  diagnostic_metrics:
-    - ssim
+analysis:
+  black_threshold: 16
+  black_row_mean_threshold: 16
+  black_row_required_ratio: 0.98
 
 report:
-  stable_segments_filename: stable_segments.json
+  json_filename: video_report.json
+  markdown_filename: video_report.md

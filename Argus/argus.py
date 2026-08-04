@@ -7,8 +7,8 @@ from pathlib import Path
 
 import yaml
 
+from src.analyzer import VideoAnalyzer
 from src.report_writer import ReportWriter
-from src.stable_page_processor import StablePageProcessor
 from src.video_reader import find_single_video
 
 
@@ -34,17 +34,19 @@ def main() -> int:
         artifacts_dir.mkdir(parents=True, exist_ok=True)
 
         video_path = find_single_video(input_dir)
-        stable_segments_report = StablePageProcessor(config=config, argus_root=argus_root).process(video_path)
+        analyzer = VideoAnalyzer(config=config, argus_root=argus_root)
+        report = analyzer.analyze(video_path)
 
         writer = ReportWriter(config=config, argus_root=argus_root)
-        stable_segments_path = writer.write_stable_segments(stable_segments_report)
+        json_path, markdown_path = writer.write(report)
 
         elapsed = time.perf_counter() - started_at
-        metadata = stable_segments_report["video_metadata"]
-        summary = stable_segments_report["execution_summary"]
+        metadata = report["video_metadata"]
+        sampling = report["sampling"]
+        roi = report["roi_recommendation"]
 
         print()
-        print("Argus Stable Page Extraction")
+        print("Argus Video Analyzer")
         print()
         print("Input:")
         print(f"  {video_path.name}")
@@ -56,12 +58,17 @@ def main() -> int:
         print(f"  {metadata['total_frames']} frames")
         print()
         print("Sampling:")
-        print(f"  frame interval: {summary['frame_interval']}")
-        print(f"  {summary['sampled_frame_count']} sampled frames")
+        print(f"  {sampling['sampling_rate']:g} samples/second")
+        print(f"  {sampling['sampled_frames']} sampled frames")
         print()
-        print("Outputs:")
-        print(f"  {stable_segments_path.relative_to(argus_root)}")
-        print(f"  {Path(config['output']['pages_directory']) / 'page_001.png'} ...")
+        print("ROI recommendation:")
+        print(f"  Top: {roi['top_crop_recommendation']} px")
+        print(f"  Bottom: {roi['bottom_crop_recommendation']} px")
+        print(f"  Confidence: {roi['confidence']}")
+        print()
+        print("Reports:")
+        print(f"  {json_path.relative_to(argus_root)}")
+        print(f"  {markdown_path.relative_to(argus_root)}")
         print()
         print(f"Completed in {elapsed:.1f} seconds.")
         return 0
