@@ -74,7 +74,6 @@ class StablePageProcessor:
         rejected_sequences: list[dict[str, Any]] = []
         image_output_failures: list[dict[str, Any]] = []
         segment_manifest: list[dict[str, Any]] = []
-        state_machine_trace: list[dict[str, Any]] = []
         grace_period_enter_count = 0
         grace_period_recovered_count = 0
         grace_period_timeout_count = 0
@@ -116,7 +115,7 @@ class StablePageProcessor:
                 if frame_index % frame_interval != 0:
                     continue
 
-                sampled = self._sampled_frame(frame, sample_index, frame_index, metadata.fps)
+                sampled = self._sampled_frame(frame, sample_index, frame_index, timestamp)
                 processed_samples.append(sampled)
                 sample_index += 1
                 if previous is None:
@@ -248,6 +247,8 @@ class StablePageProcessor:
                     if current_sequence.fail_start_time_seconds is not None:
                         current_sequence.recover_from_grace_period()
                         grace_period_recovered_count += 1
+                        if current_sequence.is_confirmed:
+                            action = "confirmed_recover_grace_period"
                     current_sequence.add_relation(previous[0], previous[1], sampled, frame, relation, previous_previous)
 
                     if (
@@ -262,7 +263,8 @@ class StablePageProcessor:
                             initial_page_count += 1
                         action = "stable_page_confirmed"
                     elif current_sequence.is_confirmed:
-                        action = "collect_confirmed_candidate"
+                        if action != "confirmed_recover_grace_period":
+                            action = "collect_confirmed_candidate"
                 elif (
                     action == "none"
                     and processor_state in ("initial_search", "searching_stable_plateau", "building_stable_plateau")
@@ -272,7 +274,41 @@ class StablePageProcessor:
                         action = "none"
                     elif processor_state == "building_stable_plateau":
                         if current_sequence.is_confirmed:
-                            action = "confirmed_candidate_hold"
+                            if current_sequence.fail_start_time_seconds is None:
+                                current_sequence.enter_grace_period(diagnostic["to_time_seconds"])
+                                grace_period_enter_count += 1
+                                action = "confirmed_enter_grace_period"
+                            else:
+                                grace_elapsed_for_diagnostic = current_sequence.grace_elapsed_seconds(
+                                    diagnostic["to_time_seconds"]
+                                )
+                                if (
+                                    grace_elapsed_for_diagnostic is not None
+                                    and grace_elapsed_for_diagnostic <= self.rule.fail_tolerance_seconds
+                                ):
+                                    action = "confirmed_continue_grace_period"
+                                else:
+                                    finalize_result = self._finalize_sequence(
+                                        current_sequence=current_sequence,
+                                        stable_segments=stable_segments,
+                                        page_number=page_number,
+                                        termination_reason="confirmed_grace_timeout",
+                                        trigger_relation=diagnostic,
+                                        boundary_after=(sampled, frame),
+                                        rejected_sequences=rejected_sequences,
+                                        image_output_failures=image_output_failures,
+                                        segment_manifest=segment_manifest,
+                                        preceding_motion_id=preceding_motion_id,
+                                        motion_end_time_seconds=motion_end_time_seconds,
+                                    )
+                                    page_number = finalize_result.next_page_number
+                                    completed_segment_count += finalize_result.completed_segment_count
+                                    discarded_short_segment_count += finalize_result.discarded_short_segment_count
+                                    output_image_count += finalize_result.output_image_count
+                                    grace_period_timeout_count += 1
+                                    action = self._finalize_action(finalize_result)
+                                    current_sequence = None
+                                    processor_state = "initial_search" if preceding_motion_id is None else "searching_stable_plateau"
                         elif current_sequence.fail_start_time_seconds is None:
                             current_sequence.enter_grace_period(diagnostic["to_time_seconds"])
                             grace_period_enter_count += 1
@@ -333,6 +369,14 @@ class StablePageProcessor:
                     non_qualifying_relation_count += 1
 
                 state_after = processor_state
+                candidate_id = current_sequence.sequence_id if current_sequence is not None else active_sequence_id
+                if candidate_id is None and action in (
+                    "cancel_plateau",
+                    "discard_short_sequence",
+                    "finalize_accepted",
+                    "motion_reentry",
+                ) and segment_manifest:
+                    candidate_id = segment_manifest[-1]["sequence_id"]
                 diagnostic["motion_candidate_active"] = motion_candidate is not None
                 diagnostic["active_motion_id"] = active_motion["motion_id"] if active_motion else None
                 diagnostic["preceding_motion_id"] = preceding_motion_id
@@ -356,17 +400,9 @@ class StablePageProcessor:
                 )
                 diagnostic["state_before"] = state_before
                 diagnostic["state_after"] = state_after
+                diagnostic["candidate_id"] = candidate_id
+                diagnostic["action"] = action
                 relation_diagnostics.append(diagnostic)
-                self._append_state_trace(
-                    state_machine_trace=state_machine_trace,
-                    relation=diagnostic,
-                    state_before=state_before,
-                    state_after=state_after,
-                    active_sequence_id=active_sequence_id if "active_sequence_id" in locals() else (
-                        current_sequence.sequence_id if current_sequence else None
-                    ),
-                    action=action,
-                )
                 if "active_sequence_id" in locals():
                     del active_sequence_id
 
@@ -403,6 +439,7 @@ class StablePageProcessor:
             {
                 "schema_version": "1.0",
                 "report_name": "Stable Page Processor",
+                "recording_protocol": self._recording_protocol(),
                 "video_metadata": metadata.__dict__,
                 "execution_summary": self._execution_summary(
                     metadata=metadata,
@@ -448,23 +485,15 @@ class StablePageProcessor:
                     "diagnostic_metrics": self.rule.diagnostic_metrics,
                     "pages_directory": str(self.pages_dir),
                 },
-                "metric_statistics": self._metric_statistics(relation_diagnostics),
-                "threshold_nearest_relations": self._threshold_nearest_relations(relation_diagnostics),
-                "relations": [self._relation_report_item(item) for item in relation_diagnostics],
-                "first_50_relations": [self._relation_report_item(item) for item in relation_diagnostics[:50]],
-                "first_15_seconds_relations": [
-                    self._relation_report_item(item)
-                    for item in relation_diagnostics
-                    if item["to_time_seconds"] <= 15.0
-                ],
                 "stable_segments": stable_segments,
                 "motion_events": motion_events,
                 "segment_manifest": self._linked_segment_manifest(segment_manifest),
-                "state_machine_trace": state_machine_trace,
-                "sequence_timeline": self._sequence_timeline(
-                    metadata_duration_seconds=metadata.duration_seconds,
+                "candidate_timeline": self._candidate_timeline(
+                    relation_diagnostics=relation_diagnostics,
                     segment_manifest=segment_manifest,
+                    stable_segments=stable_segments,
                 ),
+                "candidate_statistics": self._candidate_statistics(segment_manifest),
                 "rejected_sequences": rejected_sequences,
                 "image_output_failures": image_output_failures,
                 "warnings": self._warnings(metadata, stable_segments),
@@ -482,12 +511,28 @@ class StablePageProcessor:
             if path.is_file():
                 path.unlink()
 
-    def _timestamp(self, frame_index: int, fps: float) -> float:
-        return round(frame_index / fps, 6) if fps > 0 else 0.0
+    def _recording_protocol(self) -> dict[str, Any]:
+        return {
+            "name": "FF V1 Stable Page Extraction Recording Protocol",
+            "assumptions": [
+                "fixed_scale",
+                "fixed_crop",
+                "approximately_five_seconds_per_page",
+                "page_turns_remain_unstable",
+                "blank_pages_are_skipped_quickly",
+            ],
+            "time_scale": "seconds",
+            "transition_policy": "unknown_region",
+        }
 
-    def _sampled_frame(self, frame: np.ndarray, sample_index: int, frame_index: int, fps: float) -> SampledFrame:
+    def _sampled_frame(
+        self,
+        frame: np.ndarray,
+        sample_index: int,
+        frame_index: int,
+        timestamp: float,
+    ) -> SampledFrame:
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        timestamp = self._timestamp(frame_index, fps)
         laplacian = float(cv2.Laplacian(gray, cv2.CV_64F).var())
         return SampledFrame(
             sample_index=sample_index,
@@ -583,63 +628,12 @@ class StablePageProcessor:
             "final_qualifying": final_qualifying,
         }
 
-    def _state_name(self, current_sequence: StableSequenceState | None) -> str:
-        if current_sequence is None:
-            return "searching"
-        if current_sequence.fail_start_time_seconds is not None:
-            return "grace_period"
-        return "building"
-
     def _finalize_action(self, result: FinalizeResult) -> str:
         if result.completed_segment_count:
             return "finalize_accepted"
         if result.discarded_short_segment_count:
             return "finalize_rejected"
         return "none"
-
-    def _append_state_trace(
-        self,
-        state_machine_trace: list[dict[str, Any]],
-        relation: dict[str, Any],
-        state_before: str,
-        state_after: str,
-        active_sequence_id: int | None,
-        action: str,
-    ) -> None:
-        if relation["to_time_seconds"] > 30.0:
-            return
-        state_machine_trace.append(
-            {
-                "relation_index": relation["relation_index"],
-                "from_frame_index": relation["from_frame_index"],
-                "to_frame_index": relation["to_frame_index"],
-                "from_time_seconds": relation["from_time_seconds"],
-                "to_time_seconds": relation["to_time_seconds"],
-                "adjacent_difference_score": relation["adjacent_difference_score"],
-                "lookback_difference_score": relation["lookback_difference_score"],
-                "motion_difference_score": relation["motion_difference_score"],
-                "motion_signal": relation["motion_signal"],
-                "motion_candidate_active": relation["motion_candidate_active"],
-                "active_motion_id": relation["active_motion_id"],
-                "preceding_motion_id": relation["preceding_motion_id"],
-                "motion_end_time_seconds": relation["motion_end_time_seconds"],
-                "anchor_frame_index": relation["anchor_frame_index"],
-                "anchor_time_seconds": relation["anchor_time_seconds"],
-                "anchor_difference_score": relation["anchor_difference_score"],
-                "anchor_pass": relation["anchor_pass"],
-                "fail_grace_active": relation["state_before"] == "grace_period"
-                or relation["state_after"] == "grace_period",
-                "fail_grace_start_time_seconds": relation.get("fail_grace_start_time_seconds"),
-                "fail_grace_elapsed_seconds": relation.get("fail_grace_elapsed_seconds"),
-                "adjacent_pass": relation["adjacent_pass"],
-                "lookback_pass": relation["lookback_pass"],
-                "final_qualifying": relation["final_qualifying"],
-                "state_before": state_before,
-                "state_after": state_after,
-                "active_sequence_id": active_sequence_id,
-                "action": action,
-            }
-        )
 
     def _update_motion_candidate(
         self,
@@ -869,6 +863,7 @@ class StablePageProcessor:
         if relation is None:
             return None
         return {
+            "relation_index": relation["relation_index"],
             "from_frame_index": relation["from_frame_index"],
             "to_frame_index": relation["to_frame_index"],
             "adjacent_difference_score": relation["adjacent_difference_score"],
@@ -920,54 +915,218 @@ class StablePageProcessor:
             item["next_sequence_id"] = linked[index + 1]["sequence_id"] if index + 1 < len(linked) else None
         return linked
 
-    def _sequence_timeline(
+    def _candidate_timeline(
         self,
-        metadata_duration_seconds: float,
+        relation_diagnostics: list[dict[str, Any]],
         segment_manifest: list[dict[str, Any]],
+        stable_segments: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
-        timeline: list[dict[str, Any]] = []
-        cursor = 0.0
-        ordered = sorted(
-            segment_manifest,
-            key=lambda item: (
-                item["start_time_seconds"] is None,
-                item["start_time_seconds"] if item["start_time_seconds"] is not None else 0.0,
-            ),
-        )
-        for item in ordered:
-            start_time = item["start_time_seconds"]
-            end_time = item["end_time_seconds"]
-            if start_time is None or end_time is None:
+        diagnostics_by_candidate: dict[int, list[dict[str, Any]]] = {}
+        for relation in relation_diagnostics:
+            candidate_id = relation.get("candidate_id")
+            if candidate_id is None:
                 continue
-            if start_time > cursor:
-                timeline.append(
-                    {
-                        "start_time_seconds": cursor,
-                        "end_time_seconds": start_time,
-                        "type": "no_candidate",
-                        "sequence_id": None,
-                    }
-                )
-            timeline.append(
-                {
-                    "start_time_seconds": start_time,
-                    "end_time_seconds": end_time,
-                    "type": item["status"],
-                    "sequence_id": item["sequence_id"],
-                }
-            )
-            cursor = max(cursor, end_time)
+            diagnostics_by_candidate.setdefault(int(candidate_id), []).append(relation)
 
-        if metadata_duration_seconds > cursor:
-            timeline.append(
+        page_by_sequence_id = {
+            int(segment["sequence_id"]): int(segment["segment_index"])
+            for segment in stable_segments
+        }
+
+        timelines: list[dict[str, Any]] = []
+        for manifest in segment_manifest:
+            candidate_id = int(manifest["sequence_id"])
+            relations = diagnostics_by_candidate.get(candidate_id, [])
+            events = self._candidate_events(relations, manifest)
+            start_relation = manifest.get("first_relation_index")
+            end_relation = manifest.get("last_relation_index")
+            trigger_relation = manifest.get("trigger_relation")
+            if trigger_relation is not None:
+                end_relation = trigger_relation.get("relation_index", end_relation)
+
+            timelines.append(
                 {
-                    "start_time_seconds": cursor,
-                    "end_time_seconds": metadata_duration_seconds,
-                    "type": "no_candidate",
-                    "sequence_id": None,
+                    "candidate_id": candidate_id,
+                    "start_relation": start_relation,
+                    "start_frame": manifest.get("start_frame_index"),
+                    "start_time_seconds": manifest.get("start_time_seconds"),
+                    "end_relation": end_relation,
+                    "end_time_seconds": manifest.get("end_time_seconds"),
+                    "duration_seconds": manifest.get("duration_seconds"),
+                    "confirmed": manifest.get("confirmed_time_seconds") is not None,
+                    "accepted": manifest.get("status") == "accepted",
+                    "termination_reason": manifest.get("termination_reason"),
+                    "rejection_reason": manifest.get("rejection_reason"),
+                    "preceding_motion_id": manifest.get("preceding_motion_id"),
+                    "active_motion_id": self._candidate_active_motion_id(relations),
+                    "final_page_index": page_by_sequence_id.get(candidate_id),
+                    "events": events,
                 }
             )
-        return timeline
+        return timelines
+
+    def _candidate_events(
+        self,
+        relations: list[dict[str, Any]],
+        manifest: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        events: list[dict[str, Any]] = []
+        if manifest.get("first_relation_index") is not None:
+            events.append(
+                {
+                    "type": "start",
+                    "relation_index": manifest["first_relation_index"],
+                    "frame_index": manifest.get("start_frame_index"),
+                    "time_seconds": manifest.get("start_time_seconds"),
+                }
+            )
+
+        for relation in relations:
+            events.append(
+                {
+                    "type": self._candidate_event_type(relation),
+                    "relation_index": relation["relation_index"],
+                    "from_frame_index": relation["from_frame_index"],
+                    "to_frame_index": relation["to_frame_index"],
+                    "time_seconds": relation["to_time_seconds"],
+                    "adjacent_pass": relation["adjacent_pass"],
+                    "lookback_pass": relation["lookback_pass"],
+                    "anchor_pass": relation["anchor_pass"],
+                    "final_qualifying": relation["final_qualifying"],
+                    "motion_signal": relation["motion_signal"],
+                    "action": relation["action"],
+                    "qualification_reason": relation["qualification_reason"],
+                }
+            )
+
+        if manifest.get("confirmed_relation_index") is not None:
+            events.append(
+                {
+                    "type": "stable_confirmed",
+                    "relation_index": manifest["confirmed_relation_index"],
+                    "time_seconds": manifest.get("confirmed_time_seconds"),
+                }
+            )
+
+        trigger_relation = manifest.get("trigger_relation")
+        if trigger_relation is not None:
+            events.append(
+                {
+                    "type": self._termination_event_type(manifest),
+                    "relation_index": trigger_relation.get("relation_index"),
+                    "from_frame_index": trigger_relation.get("from_frame_index"),
+                    "to_frame_index": trigger_relation.get("to_frame_index"),
+                    "motion_signal": trigger_relation.get("motion_signal"),
+                    "final_qualifying": trigger_relation.get("final_qualifying"),
+                    "qualification_reason": self._qualification_reason(trigger_relation),
+                }
+            )
+
+        events.append(
+            {
+                "type": "accepted" if manifest.get("status") == "accepted" else "rejected",
+                "termination_reason": manifest.get("termination_reason"),
+                "rejection_reason": manifest.get("rejection_reason"),
+            }
+        )
+        return events
+
+    def _candidate_event_type(self, relation: dict[str, Any]) -> str:
+        action = relation.get("action")
+        if action in (
+            "stable_page_confirmed",
+            "collect_confirmed_candidate",
+            "confirmed_candidate_hold",
+            "confirmed_enter_grace_period",
+            "confirmed_continue_grace_period",
+            "confirmed_recover_grace_period",
+            "enter_grace_period",
+            "continue_grace_period",
+            "discard_short_sequence",
+            "finalize_accepted",
+            "cancel_plateau",
+            "motion_reentry",
+        ):
+            return str(action)
+        if relation.get("motion_signal"):
+            return "motion_signal"
+        if relation.get("final_qualifying"):
+            return "stable_relation_pass"
+        return self._qualification_reason(relation)
+
+    def _termination_event_type(self, manifest: dict[str, Any]) -> str:
+        if manifest.get("termination_reason") == "next_motion_detected":
+            return "next_motion_finalize"
+        if manifest.get("termination_reason") == "new_motion_detected":
+            return "motion_reentry"
+        if manifest.get("termination_reason") == "fail_tolerance_timeout":
+            return "grace_timeout"
+        if manifest.get("termination_reason") == "end_of_video":
+            return "eof_finalize"
+        return str(manifest.get("termination_reason") or "terminated")
+
+    def _candidate_active_motion_id(self, relations: list[dict[str, Any]]) -> int | None:
+        for relation in reversed(relations):
+            active_motion_id = relation.get("active_motion_id")
+            if active_motion_id is not None:
+                return int(active_motion_id)
+        return None
+
+    def _candidate_statistics(self, segment_manifest: list[dict[str, Any]]) -> dict[str, int]:
+        statistics = {
+            "accepted": 0,
+            "anchor_threshold_not_met": 0,
+            "minimum_duration_not_met": 0,
+            "motion_reentry": 0,
+            "grace_timeout": 0,
+            "next_motion_finalize": 0,
+            "end_of_video_finalize": 0,
+            "no_candidate_frame": 0,
+            "write_failed": 0,
+            "other_rejected": 0,
+        }
+        for manifest in segment_manifest:
+            reason = self._candidate_outcome_reason(manifest)
+            statistics[reason] = statistics.get(reason, 0) + 1
+        return statistics
+
+    def _candidate_outcome_reason(self, manifest: dict[str, Any]) -> str:
+        if manifest.get("status") == "accepted":
+            if manifest.get("termination_reason") == "next_motion_detected":
+                return "next_motion_finalize"
+            if manifest.get("termination_reason") == "end_of_video":
+                return "end_of_video_finalize"
+            return "accepted"
+
+        rejection_reason = manifest.get("rejection_reason")
+        termination_reason = manifest.get("termination_reason")
+        if rejection_reason == "minimum_stable_duration_not_met":
+            return "minimum_duration_not_met"
+        if rejection_reason == "cancelled_by_new_motion":
+            return "motion_reentry"
+        if rejection_reason == "no_candidate_frame":
+            return "no_candidate_frame"
+        if rejection_reason == "write_failed":
+            return "write_failed"
+        if termination_reason == "fail_tolerance_timeout":
+            return "grace_timeout"
+        trigger_relation = manifest.get("trigger_relation")
+        if trigger_relation is not None and not trigger_relation.get("anchor_pass", True):
+            return "anchor_threshold_not_met"
+        return "other_rejected"
+
+    def _qualification_reason(self, relation: dict[str, Any]) -> str:
+        if relation.get("motion_signal"):
+            return "motion_signal"
+        if not relation.get("adjacent_pass"):
+            return "adjacent_threshold_not_met"
+        if not relation.get("lookback_pass"):
+            return "lookback_threshold_not_met"
+        if not relation.get("anchor_pass"):
+            return "anchor_threshold_not_met"
+        if relation.get("final_qualifying"):
+            return "stable_relation_pass"
+        return str(relation.get("qualification_reason") or "not_qualified")
 
     def _execution_summary(
         self,
@@ -1099,140 +1258,3 @@ class StablePageProcessor:
             "both_fail_count": both_fail_count,
         }
 
-    def _metric_statistics(self, relation_diagnostics: list[dict[str, Any]]) -> dict[str, Any]:
-        return {
-            "adjacent_difference_statistics": self._distribution(
-                [item["adjacent_difference_score"] for item in relation_diagnostics],
-                self.rule.adjacent_difference_maximum,
-            ),
-            "lookback_difference_statistics": self._distribution(
-                [
-                    item["lookback_difference_score"]
-                    for item in relation_diagnostics
-                    if item["lookback_difference_score"] is not None
-                ],
-                self.rule.lookback_difference_maximum,
-            ),
-            "anchor_difference_statistics": self._distribution(
-                [
-                    item["anchor_difference_score"]
-                    for item in relation_diagnostics
-                    if item["anchor_difference_score"] is not None
-                ],
-                self.rule.anchor_difference_maximum,
-            ),
-            "motion_difference_statistics": self._distribution(
-                [item["motion_difference_score"] for item in relation_diagnostics],
-                self.rule.motion_difference_threshold,
-            ),
-            "ssim": self._distribution(
-                [item["ssim"] for item in relation_diagnostics],
-                self.rule.ssim_minimum,
-            ),
-        }
-
-    def _distribution(self, values: list[float], threshold: float) -> dict[str, Any]:
-        if not values:
-            return {
-                "minimum": None,
-                "p01": None,
-                "p05": None,
-                "p10": None,
-                "p25": None,
-                "median": None,
-                "p75": None,
-                "p90": None,
-                "p95": None,
-                "p99": None,
-                "maximum": None,
-                "threshold": threshold,
-            }
-
-        array = np.array(values, dtype=float)
-        return {
-            "minimum": float(np.min(array)),
-            "p01": float(np.percentile(array, 1)),
-            "p05": float(np.percentile(array, 5)),
-            "p10": float(np.percentile(array, 10)),
-            "p25": float(np.percentile(array, 25)),
-            "median": float(np.percentile(array, 50)),
-            "p75": float(np.percentile(array, 75)),
-            "p90": float(np.percentile(array, 90)),
-            "p95": float(np.percentile(array, 95)),
-            "p99": float(np.percentile(array, 99)),
-            "maximum": float(np.max(array)),
-            "threshold": threshold,
-        }
-
-    def _threshold_nearest_relations(self, relation_diagnostics: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
-        return {
-            "adjacent_difference_score": self._nearest_relations(
-                relation_diagnostics,
-                "adjacent_difference_score",
-                self.rule.adjacent_difference_maximum,
-            ),
-            "lookback_difference_score": self._nearest_relations(
-                [item for item in relation_diagnostics if item["lookback_difference_score"] is not None],
-                "lookback_difference_score",
-                self.rule.lookback_difference_maximum,
-            ),
-            "anchor_difference_score": self._nearest_relations(
-                [item for item in relation_diagnostics if item["anchor_difference_score"] is not None],
-                "anchor_difference_score",
-                self.rule.anchor_difference_maximum,
-            ),
-            "motion_difference_score": self._nearest_relations(
-                relation_diagnostics,
-                "motion_difference_score",
-                self.rule.motion_difference_threshold,
-            ),
-            "ssim": self._nearest_relations(relation_diagnostics, "ssim", self.rule.ssim_minimum),
-        }
-
-    def _nearest_relations(
-        self,
-        relation_diagnostics: list[dict[str, Any]],
-        metric: str,
-        threshold: float,
-    ) -> list[dict[str, Any]]:
-        ranked = sorted(relation_diagnostics, key=lambda item: abs(float(item[metric]) - threshold))
-        return [self._relation_report_item(item) for item in ranked[:20]]
-
-    def _relation_report_item(self, item: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "relation_index": item["relation_index"],
-            "from_frame_index": item["from_frame_index"],
-            "to_frame_index": item["to_frame_index"],
-            "from_sample_index": item["from_sample_index"],
-            "to_sample_index": item["to_sample_index"],
-            "from_time_seconds": item["from_time_seconds"],
-            "to_time_seconds": item["to_time_seconds"],
-            "adjacent_difference_score": item["adjacent_difference_score"],
-            "adjacent_pass": item["adjacent_pass"],
-            "motion_difference_score": item["motion_difference_score"],
-            "motion_signal": item["motion_signal"],
-            "motion_candidate_active": item["motion_candidate_active"],
-            "active_motion_id": item["active_motion_id"],
-            "preceding_motion_id": item["preceding_motion_id"],
-            "motion_end_time_seconds": item["motion_end_time_seconds"],
-            "lookback_frame_index": item["lookback_frame_index"],
-            "lookback_time_seconds": item["lookback_time_seconds"],
-            "lookback_time_gap_seconds": item["lookback_time_gap_seconds"],
-            "lookback_available": item["lookback_available"],
-            "lookback_difference_score": item["lookback_difference_score"],
-            "lookback_pass": item["lookback_pass"],
-            "anchor_frame_index": item["anchor_frame_index"],
-            "anchor_time_seconds": item["anchor_time_seconds"],
-            "anchor_available": item["anchor_available"],
-            "anchor_difference_score": item["anchor_difference_score"],
-            "anchor_pass": item["anchor_pass"],
-            "fail_grace_active": item["fail_grace_active"],
-            "fail_grace_start_time_seconds": item["fail_grace_start_time_seconds"],
-            "fail_grace_elapsed_seconds": item["fail_grace_elapsed_seconds"],
-            "state_before": item["state_before"],
-            "state_after": item["state_after"],
-            "ssim": item["ssim"],
-            "ssim_pass": item["ssim_pass"],
-            "final_qualifying": item["final_qualifying"],
-            "qualification_reason": item["qualification_reason"],
-        }

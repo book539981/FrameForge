@@ -12,13 +12,13 @@ sampling:
 
 stable_frame:
   ssim_minimum: 0.85
-  adjacent_difference_maximum: 0.050
+  adjacent_difference_maximum: 0.008
   lookback_seconds: 0.20
-  lookback_difference_maximum: 0.070
-  anchor_difference_maximum: 0.065
-  motion_difference_threshold: 0.040
-  motion_minimum_duration_seconds: 0.35
-  minimum_stable_duration_seconds: 0.50
+  lookback_difference_maximum: 0.008
+  anchor_difference_maximum: 0.015
+  motion_difference_threshold: 0.020
+  motion_minimum_duration_seconds: 0.15
+  minimum_stable_duration_seconds: 2.00
   fail_tolerance_seconds: 0.50
   best_frame_exclusion_seconds: 0.60
   decision_metrics:
