@@ -43,7 +43,7 @@ def main() -> int:
         elapsed = time.perf_counter() - started_at
         metadata = report["video_metadata"]
         sampling = report["sampling"]
-        roi = report["roi_recommendation"]
+        diagnostics = report["reader_diagnostics"]
 
         print()
         print("Argus Video Analyzer")
@@ -60,11 +60,12 @@ def main() -> int:
         print("Sampling:")
         print(f"  {sampling['sampling_rate']:g} samples/second")
         print(f"  {sampling['sampled_frames']} sampled frames")
+        print(f"  {diagnostics['failed_sample_count']} failed samples")
         print()
-        print("ROI recommendation:")
-        print(f"  Top: {roi['top_crop_recommendation']} px")
-        print(f"  Bottom: {roi['bottom_crop_recommendation']} px")
-        print(f"  Confidence: {roi['confidence']}")
+        print("Reader diagnostics:")
+        print(f"  {diagnostics['decoded_frame_count']} sequential decoded frames")
+        print(f"  Last successful frame: {diagnostics['last_successful_frame_index']}")
+        print(f"  First failed frame: {diagnostics['first_failed_frame_index']}")
         print()
         print("Reports:")
         print(f"  {json_path.relative_to(argus_root)}")

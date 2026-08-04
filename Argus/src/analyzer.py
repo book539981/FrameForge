@@ -1,19 +1,23 @@
 from __future__ import annotations
 
-from collections import Counter, defaultdict
+from collections import defaultdict
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from statistics import median
 from typing import Any
 
 import cv2
 import numpy as np
 
-from .video_reader import format_duration, read_metadata
+from .video_reader import (
+    format_duration,
+    read_metadata,
+    timestamp_for_frame,
+)
 
 
 @dataclass(frozen=True)
 class FrameMetrics:
+    sample_index: int
     frame_index: int
     timestamp_seconds: float
     timestamp_formatted: str
@@ -21,9 +25,25 @@ class FrameMetrics:
     brightness_mean: float
     contrast_std: float
     laplacian_variance: float
-    black_pixel_ratio: float
-    top_black_rows: int
-    bottom_black_rows: int
+    adjacent_difference_score: float | None
+    adjacent_sample_index: int | None
+    adjacent_frame_index: int | None
+    adjacent_timestamp_seconds: float | None
+    adjacent_actual_seconds: float | None
+    lookback_difference_score: float | None
+    lookback_sample_offset: int
+    lookback_sample_index: int | None
+    lookback_frame_index: int | None
+    lookback_timestamp_seconds: float | None
+    lookback_actual_seconds: float | None
+
+
+@dataclass(frozen=True)
+class SampleFailure:
+    requested_frame_index: int
+    expected_timestamp_seconds: float
+    capture_position_frames: float
+    capture_position_msec: float
 
 
 class VideoAnalyzer:
@@ -33,23 +53,36 @@ class VideoAnalyzer:
         self.samples_per_second = float(config["sampling"]["samples_per_second"])
         if self.samples_per_second <= 0:
             raise ValueError("sampling.samples_per_second must be greater than zero")
-        self.black_threshold = int(config["analysis"]["black_threshold"])
-        self.black_row_mean_threshold = float(config["analysis"]["black_row_mean_threshold"])
-        self.black_row_required_ratio = float(config["analysis"]["black_row_required_ratio"])
+        self.lookback_sample_offset = int(config["analysis"]["lookback_sample_offset"])
+        if self.lookback_sample_offset <= 0:
+            raise ValueError("analysis.lookback_sample_offset must be greater than zero")
 
     def analyze(self, video_path: Path) -> dict[str, Any]:
         metadata = read_metadata(video_path)
         frame_interval = self._frame_interval(metadata.fps)
         sampled_indices = list(range(0, metadata.total_frames, frame_interval))
 
-        frames = self._sample_frames(video_path, sampled_indices, metadata.fps)
+        frames, failed_samples, reader_diagnostics = self._sample_frames(
+            video_path=video_path,
+            frame_interval=frame_interval,
+            metadata_total_frames=metadata.total_frames,
+            fps=metadata.fps,
+        )
         frame_dicts = [asdict(frame) for frame in frames]
-        black_border = self._black_border_summary(frames)
+        failed_sample_dicts = [asdict(sample) for sample in failed_samples]
+        reader_diagnostics.update(
+            {
+                "requested_sample_count": len(sampled_indices),
+                "successful_sample_count": len(frames),
+                "failed_sample_count": len(failed_samples),
+            }
+        )
 
         report = {
             "schema_version": "1.0",
             "video_metadata": asdict(metadata),
             "config": self.config,
+            "reader_diagnostics": reader_diagnostics,
             "sampling": {
                 "total_frames": metadata.total_frames,
                 "sampled_frames": len(frames),
@@ -58,18 +91,41 @@ class VideoAnalyzer:
                 "first_sampled_frame_index": frames[0].frame_index if frames else None,
                 "last_sampled_frame_index": frames[-1].frame_index if frames else None,
                 "all_requested_frames_read": len(frames) == len(sampled_indices),
-                "failed_frame_count": len(sampled_indices) - len(frames),
+                "first_requested_frame_index": sampled_indices[0] if sampled_indices else None,
+                "last_requested_frame_index": sampled_indices[-1] if sampled_indices else None,
+                "first_successful_sample_frame_index": frames[0].frame_index if frames else None,
+                "last_successful_sample_frame_index": frames[-1].frame_index if frames else None,
+                "first_failed_sample_frame_index": failed_samples[0].requested_frame_index
+                if failed_samples
+                else None,
+                "last_failed_sample_frame_index": failed_samples[-1].requested_frame_index
+                if failed_samples
+                else None,
+                "unsampled_tail_frame_count": self._unsampled_tail_frame_count(
+                    metadata.total_frames, sampled_indices
+                ),
+                "unsampled_tail_duration_seconds": self._unsampled_tail_duration_seconds(
+                    metadata.fps, metadata.total_frames, sampled_indices
+                ),
+                "failed_tail_frame_count": self._failed_tail_frame_count(failed_samples, frames),
+                "failed_tail_duration_seconds": self._failed_tail_duration_seconds(
+                    metadata.fps, failed_samples, frames
+                ),
             },
             "frame_statistics": {
                 "brightness": summarize_values(frame.brightness_mean for frame in frames),
                 "contrast": summarize_values(frame.contrast_std for frame in frames),
                 "laplacian_variance": summarize_values(frame.laplacian_variance for frame in frames),
-                "black_pixel_ratio": summarize_values(frame.black_pixel_ratio for frame in frames),
+                "adjacent_difference_score": summarize_values(
+                    frame.adjacent_difference_score for frame in frames
+                ),
+                "lookback_difference_score": summarize_values(
+                    frame.lookback_difference_score for frame in frames
+                ),
             },
             "sampled_frames": frame_dicts,
+            "failed_samples": failed_sample_dicts,
             "per_second_summary": self._per_second_summary(frames),
-            "black_border_analysis": black_border,
-            "roi_recommendation": self._roi_recommendation(black_border, len(frames)),
             "warnings": self._warnings(metadata, frames),
             "errors": [],
         }
@@ -80,90 +136,205 @@ class VideoAnalyzer:
             return 1
         return max(1, int(round(fps / self.samples_per_second)))
 
-    def _sample_frames(self, video_path: Path, frame_indices: list[int], fps: float) -> list[FrameMetrics]:
+    def _sample_frames(
+        self, video_path: Path, frame_interval: int, metadata_total_frames: int, fps: float
+    ) -> tuple[list[FrameMetrics], list[SampleFailure], dict[str, Any]]:
         capture = cv2.VideoCapture(str(video_path))
         frames: list[FrameMetrics] = []
+        failed_samples: list[SampleFailure] = []
+        decoded_frame_count = 0
+        decode_attempt_count = 0
+        first_failed_frame_index = None
+        first_failed_timestamp_seconds = None
+        capture_position_frames_at_failure = None
+        capture_position_msec_at_failure = None
+        successful_history: list[tuple[FrameMetrics, np.ndarray]] = []
         try:
-            for frame_index in frame_indices:
-                capture.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+            while True:
                 ok, frame = capture.read()
+                decode_attempt_count += 1
                 if not ok or frame is None:
+                    first_failed_frame_index = decoded_frame_count
+                    first_failed_timestamp_seconds = timestamp_for_frame(decoded_frame_count, fps)
+                    capture_position_frames_at_failure = float(
+                        capture.get(cv2.CAP_PROP_POS_FRAMES) or 0.0
+                    )
+                    capture_position_msec_at_failure = float(
+                        capture.get(cv2.CAP_PROP_POS_MSEC) or 0.0
+                    )
+                    break
+
+                frame_index = decoded_frame_count
+                decoded_frame_count += 1
+                if frame_index % frame_interval != 0:
                     continue
-                frames.append(self._analyze_frame(frame, frame_index, fps))
+
+                sample_index = len(frames)
+                metrics, gray = self._analyze_frame(
+                    frame=frame,
+                    sample_index=sample_index,
+                    frame_index=frame_index,
+                    fps=fps,
+                    successful_history=successful_history,
+                )
+                frames.append(metrics)
+                successful_history.append((metrics, gray))
         finally:
             capture.release()
-        return frames
 
-    def _analyze_frame(self, frame: np.ndarray, frame_index: int, fps: float) -> FrameMetrics:
+        if first_failed_frame_index is not None and first_failed_frame_index < metadata_total_frames:
+            for frame_index in range(first_failed_frame_index, metadata_total_frames):
+                if frame_index % frame_interval == 0:
+                    failed_samples.append(
+                        SampleFailure(
+                            requested_frame_index=frame_index,
+                            expected_timestamp_seconds=timestamp_for_frame(frame_index, fps),
+                            capture_position_frames=capture_position_frames_at_failure or 0.0,
+                            capture_position_msec=capture_position_msec_at_failure or 0.0,
+                        )
+                    )
+
+        expected_last_frame_index = metadata_total_frames - 1 if metadata_total_frames > 0 else None
+        last_successful_frame_index = decoded_frame_count - 1 if decoded_frame_count > 0 else None
+        normal_eof_count = 1 if first_failed_frame_index == metadata_total_frames else 0
+        unexpected_decode_failure_count = (
+            1
+            if first_failed_frame_index is not None and first_failed_frame_index < metadata_total_frames
+            else 0
+        )
+        missing_tail_frame_count = (
+            max(0, metadata_total_frames - decoded_frame_count)
+            if metadata_total_frames > 0
+            else None
+        )
+        missing_tail_duration_seconds = (
+            round(missing_tail_frame_count / fps, 6)
+            if missing_tail_frame_count is not None and fps > 0
+            else None
+        )
+
+        diagnostics = {
+            "metadata_total_frames": metadata_total_frames,
+            "metadata_fps": fps,
+            "metadata_duration_seconds": metadata_total_frames / fps if fps > 0 else 0.0,
+            "duration_from_frame_count_seconds": metadata_total_frames / fps if fps > 0 else 0.0,
+            "decode_attempt_count": decode_attempt_count,
+            "decoded_frame_count": decoded_frame_count,
+            "normal_eof_count": normal_eof_count,
+            "unexpected_decode_failure_count": unexpected_decode_failure_count,
+            "last_successful_frame_index": last_successful_frame_index,
+            "last_successful_timestamp_seconds": (
+                timestamp_for_frame(last_successful_frame_index, fps)
+                if last_successful_frame_index is not None
+                else None
+            ),
+            "first_failed_frame_index": first_failed_frame_index,
+            "first_failed_timestamp_seconds": first_failed_timestamp_seconds,
+            "capture_position_frames_at_failure": capture_position_frames_at_failure,
+            "capture_position_msec_at_failure": capture_position_msec_at_failure,
+            "expected_last_frame_index": expected_last_frame_index,
+            "missing_tail_frame_count": missing_tail_frame_count,
+            "missing_tail_duration_seconds": missing_tail_duration_seconds,
+        }
+        return frames, failed_samples, diagnostics
+
+    def _analyze_frame(
+        self,
+        frame: np.ndarray,
+        sample_index: int,
+        frame_index: int,
+        fps: float,
+        successful_history: list[tuple[FrameMetrics, np.ndarray]],
+    ) -> tuple[FrameMetrics, np.ndarray]:
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        timestamp = frame_index / fps if fps > 0 else 0.0
-        black_pixels = gray < self.black_threshold
-        top_rows, bottom_rows = self._black_row_counts(gray)
+        timestamp = timestamp_for_frame(frame_index, fps)
+
+        adjacent = successful_history[-1] if successful_history else None
+        if adjacent is None:
+            adjacent_difference_score = None
+            adjacent_sample_index = None
+            adjacent_frame_index = None
+            adjacent_timestamp_seconds = None
+            adjacent_actual_seconds = None
+        else:
+            adjacent_metrics, adjacent_gray = adjacent
+            adjacent_difference_score = normalized_mean_absolute_difference(adjacent_gray, gray)
+            adjacent_sample_index = adjacent_metrics.sample_index
+            adjacent_frame_index = adjacent_metrics.frame_index
+            adjacent_timestamp_seconds = adjacent_metrics.timestamp_seconds
+            adjacent_actual_seconds = round(timestamp - adjacent_metrics.timestamp_seconds, 6)
+
+        lookback = (
+            successful_history[-self.lookback_sample_offset]
+            if len(successful_history) >= self.lookback_sample_offset
+            else None
+        )
+        if lookback is None:
+            lookback_difference_score = None
+            lookback_sample_index = None
+            lookback_frame_index = None
+            lookback_timestamp_seconds = None
+            lookback_actual_seconds = None
+        else:
+            lookback_metrics, lookback_gray = lookback
+            lookback_difference_score = normalized_mean_absolute_difference(lookback_gray, gray)
+            lookback_sample_index = lookback_metrics.sample_index
+            lookback_frame_index = lookback_metrics.frame_index
+            lookback_timestamp_seconds = lookback_metrics.timestamp_seconds
+            lookback_actual_seconds = round(timestamp - lookback_metrics.timestamp_seconds, 6)
 
         return FrameMetrics(
+            sample_index=sample_index,
             frame_index=frame_index,
-            timestamp_seconds=round(timestamp, 6),
+            timestamp_seconds=timestamp,
             timestamp_formatted=format_duration(timestamp),
             second=int(timestamp),
             brightness_mean=float(np.mean(gray)),
             contrast_std=float(np.std(gray)),
             laplacian_variance=float(cv2.Laplacian(gray, cv2.CV_64F).var()),
-            black_pixel_ratio=float(np.mean(black_pixels)),
-            top_black_rows=top_rows,
-            bottom_black_rows=bottom_rows,
-        )
+            adjacent_difference_score=adjacent_difference_score,
+            adjacent_sample_index=adjacent_sample_index,
+            adjacent_frame_index=adjacent_frame_index,
+            adjacent_timestamp_seconds=adjacent_timestamp_seconds,
+            adjacent_actual_seconds=adjacent_actual_seconds,
+            lookback_difference_score=lookback_difference_score,
+            lookback_sample_offset=self.lookback_sample_offset,
+            lookback_sample_index=lookback_sample_index,
+            lookback_frame_index=lookback_frame_index,
+            lookback_timestamp_seconds=lookback_timestamp_seconds,
+            lookback_actual_seconds=lookback_actual_seconds,
+        ), gray
 
-    def _black_row_counts(self, gray: np.ndarray) -> tuple[int, int]:
-        row_means = np.mean(gray, axis=1)
-        row_black_ratio = np.mean(gray < self.black_threshold, axis=1)
-        black_rows = (row_means <= self.black_row_mean_threshold) & (
-            row_black_ratio >= self.black_row_required_ratio
-        )
+    def _unsampled_tail_frame_count(
+        self, total_frames: int, sampled_indices: list[int]
+    ) -> int | None:
+        if total_frames <= 0 or not sampled_indices:
+            return None
+        expected_last_frame_index = total_frames - 1
+        return max(0, expected_last_frame_index - sampled_indices[-1])
 
-        top = 0
-        for is_black in black_rows:
-            if not is_black:
-                break
-            top += 1
+    def _unsampled_tail_duration_seconds(
+        self, fps: float, total_frames: int, sampled_indices: list[int]
+    ) -> float | None:
+        tail_frames = self._unsampled_tail_frame_count(total_frames, sampled_indices)
+        if tail_frames is None or fps <= 0:
+            return None
+        return round(tail_frames / fps, 6)
 
-        bottom = 0
-        for is_black in reversed(black_rows):
-            if not is_black:
-                break
-            bottom += 1
+    def _failed_tail_frame_count(
+        self, failed_samples: list[SampleFailure], frames: list[FrameMetrics]
+    ) -> int:
+        if not failed_samples:
+            return 0
+        last_successful_sample = frames[-1].frame_index if frames else -1
+        return sum(1 for sample in failed_samples if sample.requested_frame_index > last_successful_sample)
 
-        return top, bottom
-
-    def _black_border_summary(self, frames: list[FrameMetrics]) -> dict[str, Any]:
-        return {
-            "top_black_rows": summarize_values((frame.top_black_rows for frame in frames), include_mode=True),
-            "bottom_black_rows": summarize_values((frame.bottom_black_rows for frame in frames), include_mode=True),
-        }
-
-    def _roi_recommendation(self, black_border: dict[str, Any], frame_count: int) -> dict[str, Any]:
-        top_stats = black_border["top_black_rows"]
-        bottom_stats = black_border["bottom_black_rows"]
-        top = int(round(top_stats.get("median") or 0))
-        bottom = int(round(bottom_stats.get("median") or 0))
-
-        confidence = "unknown"
-        if frame_count:
-            top_spread = (top_stats.get("p90") or 0) - (top_stats.get("p10") or 0)
-            bottom_spread = (bottom_stats.get("p90") or 0) - (bottom_stats.get("p10") or 0)
-            if top == 0 and bottom == 0:
-                confidence = "low"
-            elif top_spread <= 2 and bottom_spread <= 2:
-                confidence = "high"
-            elif top_spread <= 10 and bottom_spread <= 10:
-                confidence = "medium"
-            else:
-                confidence = "low"
-
-        return {
-            "top_crop_recommendation": top,
-            "bottom_crop_recommendation": bottom,
-            "confidence": confidence,
-        }
+    def _failed_tail_duration_seconds(
+        self, fps: float, failed_samples: list[SampleFailure], frames: list[FrameMetrics]
+    ) -> float | None:
+        if fps <= 0:
+            return None
+        return round(self._failed_tail_frame_count(failed_samples, frames) / fps, 6)
 
     def _per_second_summary(self, frames: list[FrameMetrics]) -> list[dict[str, Any]]:
         grouped: dict[int, list[FrameMetrics]] = defaultdict(list)
@@ -183,9 +354,12 @@ class VideoAnalyzer:
                     "contrast_mean": mean(item.contrast_std for item in items),
                     "laplacian_variance_mean": mean(laplacian_values),
                     "laplacian_variance_minimum": min(laplacian_values) if laplacian_values else None,
-                    "black_pixel_ratio_mean": mean(item.black_pixel_ratio for item in items),
-                    "top_black_rows_median": safe_median(item.top_black_rows for item in items),
-                    "bottom_black_rows_median": safe_median(item.bottom_black_rows for item in items),
+                    "adjacent_difference_mean": mean(
+                        item.adjacent_difference_score for item in items
+                    ),
+                    "lookback_difference_mean": mean(
+                        item.lookback_difference_score for item in items
+                    ),
                 }
             )
         return rows
@@ -201,10 +375,14 @@ class VideoAnalyzer:
         return warnings
 
 
-def summarize_values(values: Any, include_mode: bool = False) -> dict[str, Any]:
-    numbers = [float(value) for value in values]
+def normalized_mean_absolute_difference(previous_gray: np.ndarray, current_gray: np.ndarray) -> float:
+    return float(np.mean(cv2.absdiff(previous_gray, current_gray))) / 255.0
+
+
+def summarize_values(values: Any) -> dict[str, Any]:
+    numbers = [float(value) for value in values if value is not None]
     if not numbers:
-        summary: dict[str, Any] = {
+        return {
             "minimum": None,
             "maximum": None,
             "mean": None,
@@ -215,12 +393,9 @@ def summarize_values(values: Any, include_mode: bool = False) -> dict[str, Any]:
             "p75": None,
             "p90": None,
         }
-        if include_mode:
-            summary["mode"] = None
-        return summary
 
     array = np.array(numbers, dtype=float)
-    summary = {
+    return {
         "minimum": float(np.min(array)),
         "maximum": float(np.max(array)),
         "mean": float(np.mean(array)),
@@ -231,20 +406,11 @@ def summarize_values(values: Any, include_mode: bool = False) -> dict[str, Any]:
         "p75": float(np.percentile(array, 75)),
         "p90": float(np.percentile(array, 90)),
     }
-    if include_mode:
-        counts = Counter(int(round(value)) for value in numbers)
-        summary["mode"] = counts.most_common(1)[0][0]
-    return summary
 
 
 def mean(values: Any) -> float | None:
-    numbers = [float(value) for value in values]
+    numbers = [float(value) for value in values if value is not None]
     return float(sum(numbers) / len(numbers)) if numbers else None
-
-
-def safe_median(values: Any) -> float | None:
-    numbers = [float(value) for value in values]
-    return float(median(numbers)) if numbers else None
 
 
 def scrub_json(value: Any) -> Any:

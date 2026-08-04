@@ -8,9 +8,7 @@ sampling:
   samples_per_second: 5
 
 analysis:
-  black_threshold: 16
-  black_row_mean_threshold: 16
-  black_row_required_ratio: 0.98
+  lookback_sample_offset: 2
 
 report:
   json_filename: video_report.json

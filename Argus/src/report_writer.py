@@ -26,9 +26,8 @@ class ReportWriter:
     def _to_markdown(self, report: dict[str, Any]) -> str:
         metadata = report["video_metadata"]
         sampling = report["sampling"]
+        diagnostics = report["reader_diagnostics"]
         stats = report["frame_statistics"]
-        black_border = report["black_border_analysis"]
-        roi = report["roi_recommendation"]
         warnings = report["warnings"]
         errors = report["errors"]
 
@@ -41,8 +40,8 @@ class ReportWriter:
             f"- Resolution: {metadata['width']} x {metadata['height']}",
             f"- Duration: {metadata['duration_seconds']:.3f} seconds ({metadata['duration_formatted']})",
             f"- Sampled frames: {sampling['sampled_frames']}",
-            f"- ROI: top {roi['top_crop_recommendation']} px, bottom {roi['bottom_crop_recommendation']} px",
-            f"- ROI confidence: {roi['confidence']}",
+            f"- Failed samples: {diagnostics['failed_sample_count']}",
+            f"- Last decoded frame: {diagnostics['last_successful_frame_index']}",
             "",
             "## 2. Video Metadata",
             "",
@@ -66,31 +65,43 @@ class ReportWriter:
             "| --- | --- |",
             f"| Sampling rate | {sampling['sampling_rate']:g} samples/second |",
             f"| Frame interval | {sampling['frame_interval']} |",
+            f"| Lookback sample offset | {report['config']['analysis']['lookback_sample_offset']} |",
+            f"| First requested frame | {sampling['first_requested_frame_index']} |",
+            f"| Last requested frame | {sampling['last_requested_frame_index']} |",
             f"| First sampled frame | {sampling['first_sampled_frame_index']} |",
             f"| Last sampled frame | {sampling['last_sampled_frame_index']} |",
-            f"| Failed frame count | {sampling['failed_frame_count']} |",
+            f"| First failed sample frame | {sampling['first_failed_sample_frame_index']} |",
+            f"| Last failed sample frame | {sampling['last_failed_sample_frame_index']} |",
+            f"| Unsampled tail frame count | {sampling['unsampled_tail_frame_count']} |",
+            f"| Unsampled tail duration seconds | {fmt(sampling['unsampled_tail_duration_seconds'])} |",
+            f"| Failed tail frame count | {sampling['failed_tail_frame_count']} |",
+            f"| Failed tail duration seconds | {fmt(sampling['failed_tail_duration_seconds'])} |",
             "",
-            "## 4. Frame Statistics",
+            "## 4. Reader Diagnostics",
+            "",
+            self._reader_diagnostics_table(diagnostics),
+            "",
+            "## 5. Frame Statistics",
             "",
             self._statistics_table(stats),
             "",
-            "## 5. Black Border Analysis",
+            "## 6. Adjacent Difference Statistics",
             "",
-            self._black_border_table(black_border),
+            self._single_statistics_table("Adjacent Difference", stats["adjacent_difference_score"]),
             "",
-            "## 6. ROI Recommendation",
+            "## 7. Lookback Difference Statistics",
             "",
-            "| Field | Value |",
-            "| --- | --- |",
-            f"| Top crop recommendation | {roi['top_crop_recommendation']} px |",
-            f"| Bottom crop recommendation | {roi['bottom_crop_recommendation']} px |",
-            f"| Confidence | {roi['confidence']} |",
+            self._single_statistics_table("Lookback Difference", stats["lookback_difference_score"]),
             "",
-            "## 7. Per-Second Summary",
+            "## 8. Failed Samples",
+            "",
+            self._failed_samples_table(report["failed_samples"]),
+            "",
+            "## 9. Per-Second Summary",
             "",
             self._per_second_table(report["per_second_summary"]),
             "",
-            "## 8. Warnings and Errors",
+            "## 10. Warnings and Errors",
             "",
             self._messages(warnings, errors),
             "",
@@ -106,7 +117,8 @@ class ReportWriter:
             "brightness": "Brightness",
             "contrast": "Contrast",
             "laplacian_variance": "Laplacian variance",
-            "black_pixel_ratio": "Black pixel ratio",
+            "adjacent_difference_score": "Adjacent difference",
+            "lookback_difference_score": "Lookback difference",
         }
         for key, label in labels.items():
             item = stats[key]
@@ -117,31 +129,76 @@ class ReportWriter:
             )
         return "\n".join(rows)
 
-    def _black_border_table(self, black_border: dict[str, dict[str, Any]]) -> str:
+    def _single_statistics_table(self, label: str, item: dict[str, Any]) -> str:
         rows = [
-            "| Border | Min | Max | Mean | Median | Mode | P10 | P90 |",
-            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+            "| Metric | Min | Max | Mean | Median | Std Dev | P10 | P25 | P75 | P90 |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
         ]
-        for key, label in (("top_black_rows", "Top black rows"), ("bottom_black_rows", "Bottom black rows")):
-            item = black_border[key]
+        rows.append(
+            f"| {label} | {fmt(item['minimum'])} | {fmt(item['maximum'])} | {fmt(item['mean'])} | "
+            f"{fmt(item['median'])} | {fmt(item['standard_deviation'])} | {fmt(item['p10'])} | "
+            f"{fmt(item['p25'])} | {fmt(item['p75'])} | {fmt(item['p90'])} |"
+        )
+        return "\n".join(rows)
+
+    def _reader_diagnostics_table(self, diagnostics: dict[str, Any]) -> str:
+        rows = [
+            "| Field | Value |",
+            "| --- | ---: |",
+        ]
+        keys = [
+            "metadata_total_frames",
+            "metadata_fps",
+            "metadata_duration_seconds",
+            "duration_from_frame_count_seconds",
+            "decode_attempt_count",
+            "decoded_frame_count",
+            "normal_eof_count",
+            "unexpected_decode_failure_count",
+            "last_successful_frame_index",
+            "last_successful_timestamp_seconds",
+            "first_failed_frame_index",
+            "first_failed_timestamp_seconds",
+            "capture_position_frames_at_failure",
+            "capture_position_msec_at_failure",
+            "expected_last_frame_index",
+            "missing_tail_frame_count",
+            "missing_tail_duration_seconds",
+            "requested_sample_count",
+            "successful_sample_count",
+            "failed_sample_count",
+        ]
+        for key in keys:
+            rows.append(f"| {key} | {fmt(diagnostics.get(key))} |")
+        return "\n".join(rows)
+
+    def _failed_samples_table(self, failed_samples: list[dict[str, Any]]) -> str:
+        if not failed_samples:
+            return "- No failed samples."
+
+        rows = [
+            "| Requested Frame | Expected Timestamp Seconds | Capture Position Frames | Capture Position Msec |",
+            "| ---: | ---: | ---: | ---: |",
+        ]
+        for sample in failed_samples:
             rows.append(
-                f"| {label} | {fmt(item['minimum'])} | {fmt(item['maximum'])} | {fmt(item['mean'])} | "
-                f"{fmt(item['median'])} | {fmt(item['mode'])} | {fmt(item['p10'])} | {fmt(item['p90'])} |"
+                f"| {sample['requested_frame_index']} | {fmt(sample['expected_timestamp_seconds'])} | "
+                f"{fmt(sample['capture_position_frames'])} | {fmt(sample['capture_position_msec'])} |"
             )
         return "\n".join(rows)
 
     def _per_second_table(self, rows: list[dict[str, Any]]) -> str:
         table = [
-            "| Second | Frame Indices | Samples | Brightness Mean | Contrast Mean | Laplacian Mean | Laplacian Min | Black Ratio Mean | Top Rows Median | Bottom Rows Median |",
-            "| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+            "| Second | Frame Indices | Samples | Brightness Mean | Contrast Mean | Laplacian Mean | Laplacian Min | Adjacent Difference Mean | Lookback Difference Mean |",
+            "| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
         ]
         for row in rows:
             indices = ", ".join(str(index) for index in row["frame_indices"])
             table.append(
                 f"| {row['second']} | {indices} | {row['sample_count']} | {fmt(row['brightness_mean'])} | "
                 f"{fmt(row['contrast_mean'])} | {fmt(row['laplacian_variance_mean'])} | "
-                f"{fmt(row['laplacian_variance_minimum'])} | {fmt(row['black_pixel_ratio_mean'])} | "
-                f"{fmt(row['top_black_rows_median'])} | {fmt(row['bottom_black_rows_median'])} |"
+                f"{fmt(row['laplacian_variance_minimum'])} | {fmt(row['adjacent_difference_mean'])} | "
+                f"{fmt(row['lookback_difference_mean'])} |"
             )
         return "\n".join(table)
 

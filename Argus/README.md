@@ -1,14 +1,37 @@
 # Argus
 
-Argus 是 FF 的 M1 Video Analyzer。
+Argus is the FF M1 Video Analyzer.
 
-## Current Phase
+## Current Milestone
 
-目前正式流程：
+```text
+M1
+Video Analyzer
+```
 
-- 找到單一輸入影片
-- 讀取影片 metadata
-- 依 sampling 設定抽樣 frame
-- 計算亮度、對比、Laplacian、黑邊比例等 metrics
-- 產生 Video Analyzer JSON report
-- 產生 Video Analyzer Markdown report
+Argus reads one video from `input`, decodes frames sequentially, samples matching frames, and writes analyzer facts to JSON and Markdown reports.
+
+## M1 Facts
+
+Current frame metrics:
+
+- Brightness mean
+- Contrast standard deviation
+- Laplacian variance
+- Adjacent difference score against the previous successful sample
+- Lookback difference score against the sample `analysis.lookback_sample_offset` positions earlier
+
+Reader diagnostics record metadata-derived duration, sequential decode results, sample request ranges, EOF status, and failed sample requests.
+
+## Run
+
+```powershell
+python .\Argus\argus.py
+```
+
+Reports are written to:
+
+```text
+Argus/output/artifacts/video_report.json
+Argus/output/artifacts/video_report.md
+```
