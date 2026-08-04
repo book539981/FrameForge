@@ -1,11 +1,11 @@
 # FF Architecture M1F
 
-Generated for the current FF M1F codebase.
+Generated for the current FF codebase after M2 Analyzer semantic alignment.
 
 Scope:
 
 - Project structure under `D:\TTT\FF`
-- M1F Argus execution pipeline
+- Analyzer execution pipeline
 - Python classes, functions, and direct call references
 
 Excluded from structural expansion:
@@ -19,23 +19,24 @@ Excluded from structural expansion:
 ## 1. Current Milestone
 
 ```text
-M1
-Video Analyzer
+M2 architecture alignment
+Analyzer semantic correction
 ```
 
-M1F current implementation focuses on Analyzer facts only:
+Current Analyzer implementation focuses on facts only:
 
 - Sequential video decoding
-- Sequential frame sampling
+- Time-based Sampling layer
+- Frame Metrics Analysis
 - Brightness
 - Contrast
 - Laplacian variance
 - Adjacent difference
 - Lookback difference
-- JSON report
-- Markdown report
+- Facts JSON report
+- Facts Markdown report
 
-No M2 behavior is part of this architecture file.
+Analyzer does not own Stable decisions, thresholds, rules, state machines, transition decisions, or representative frame selection.
 
 ---
 
@@ -81,28 +82,27 @@ FF/
 | --- | --- |
 | `Argus/argus.py` | CLI entrypoint. Loads config, finds input video, runs analyzer, writes reports, prints execution summary. |
 | `Argus/src/video_reader.py` | Video file discovery, metadata extraction, duration formatting, FOURCC decoding, timestamp conversion. |
-| `Argus/src/analyzer.py` | M1F Analyzer. Sequentially decodes video, samples frames, computes metrics, builds report facts and diagnostics. |
+| `Argus/src/analyzer.py` | Analyzer facts output. Sequentially decodes video, builds the sample sequence through the Sampling layer, computes frame metrics, and builds facts/diagnostics. |
 | `Argus/src/report_writer.py` | Writes JSON report and renders Markdown report from analyzer facts. |
-| `Argus/config.yaml` | M1F runtime config: input, output, sampling rate, lookback sample offset, report filenames. |
+| `Argus/config.yaml` | Runtime config: input, output, sampling rate, lookback sample offset, report filenames. |
 | `Argus/README.md` | Argus M1 usage and fact summary. |
 | `Proto/*.md` | FF governance, project reference, and development workflow documents. |
 
 ---
 
-## 4. M1F Pipeline
+## 4. Analyzer Workflow
 
 ```text
-Video
+Sequential Decode
 
 ↓
 
-Sequential Video Reader
+Time-based Sampling
+(fixed-time Sample Sequence)
 
 ↓
 
-Sequential Frame Sampling
-
-↓
+Frame Metrics Analysis
 
 Brightness
 Contrast
@@ -112,12 +112,7 @@ Lookback Difference
 
 ↓
 
-Analyzer
-
-↓
-
-JSON Report
-Markdown Report
+Facts Output
 ```
 
 ---
@@ -214,8 +209,7 @@ report:
 | `VideoAnalyzer` | 49 | class | Coordinate M1 analysis for a single video. |
 | `VideoAnalyzer.__init__` | 50 | method | Read sampling and analysis config. |
 | `VideoAnalyzer.analyze` | 60 | method | Build full JSON-ready analyzer report. |
-| `VideoAnalyzer._frame_interval` | 134 | method | Convert FPS and sample rate into frame interval. |
-| `VideoAnalyzer._sample_frames` | 139 | method | Sequentially decode frames and analyze frames matching the sample interval. |
+| `VideoAnalyzer._sample_frames` | 139 | method | Sequentially decode frames and create samples when decoded timestamps reach fixed sample-period targets. |
 | `VideoAnalyzer._analyze_frame` | 241 | method | Compute metrics for one sampled frame. |
 | `VideoAnalyzer._unsampled_tail_frame_count` | 308 | method | Count legal tail frames not selected by interval sampling. |
 | `VideoAnalyzer._unsampled_tail_duration_seconds` | 316 | method | Convert unsampled tail frame count to seconds. |
@@ -320,8 +314,7 @@ typing.Any
 | Caller | Direct calls |
 | --- | --- |
 | `VideoAnalyzer.__init__` | `float`, `int`, `ValueError` |
-| `VideoAnalyzer.analyze` | `read_metadata`, `_frame_interval`, `range`, `list`, `_sample_frames`, `asdict`, `reader_diagnostics.update`, `len`, `_unsampled_tail_frame_count`, `_unsampled_tail_duration_seconds`, `_failed_tail_frame_count`, `_failed_tail_duration_seconds`, `summarize_values`, `_per_second_summary`, `_warnings`, `scrub_json` |
-| `VideoAnalyzer._frame_interval` | `max`, `int`, `round` |
+| `VideoAnalyzer.analyze` | `read_metadata`, `_sample_frames`, `asdict`, `reader_diagnostics.update`, `len`, `_unsampled_tail_frame_count`, `_unsampled_tail_duration_seconds`, `_failed_tail_frame_count`, `_failed_tail_duration_seconds`, `summarize_values`, `_per_second_summary`, `_warnings`, `scrub_json` |
 | `VideoAnalyzer._sample_frames` | `cv2.VideoCapture`, `str`, `capture.read`, `timestamp_for_frame`, `capture.get`, `float`, `_analyze_frame`, `frames.append`, `successful_history.append`, `capture.release`, `range`, `failed_samples.append`, `SampleFailure`, `max`, `round` |
 | `VideoAnalyzer._analyze_frame` | `cv2.cvtColor`, `timestamp_for_frame`, `normalized_mean_absolute_difference`, `round`, `FrameMetrics`, `format_duration`, `int`, `float`, `np.mean`, `np.std`, `cv2.Laplacian`, `var` |
 | `VideoAnalyzer._unsampled_tail_frame_count` | `max` |
@@ -461,7 +454,7 @@ capture.read() from frame 0 forward
 ↓
 frame_index = decoded_frame_count before increment
 ↓
-if frame_index % frame_interval == 0
+if frame_timestamp >= next_sample_time
   analyze sampled frame
 else
   discard frame
@@ -469,7 +462,7 @@ else
 normal EOF ends loop
 ```
 
-Formal sampling does not use random frame seek.
+Formal sampling does not use random frame seek and does not build the sample sequence from frame offsets.
 
 `CAP_PROP_POS_FRAMES` is only read in diagnostics to record OpenCV's position at EOF or decode failure.
 

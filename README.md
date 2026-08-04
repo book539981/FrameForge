@@ -6,15 +6,15 @@ FF 是影片教材數位化專案。
 
 ## Current Phase
 
-Argus V1 / M1：
+Argus / M2 架構語意校正：
 
 1. 讀取單一輸入影片
-2. 分析影片 metadata
-3. 依設定抽樣 frame
-4. 計算 frame metrics
-5. 輸出 Video Analyzer JSON report
-6. 輸出 Video Analyzer Markdown report
+2. Sequential Decode
+3. Time-based Sampling
+4. Frame Metrics Analysis
+5. 輸出 Facts JSON report
+6. 輸出 Facts Markdown report
 
 ## Engines
 
-- Argus：M1 Video Analyzer
+- Argus：Video Analyzer facts output

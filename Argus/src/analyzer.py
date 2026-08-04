@@ -11,7 +11,6 @@ import numpy as np
 from .video_reader import (
     format_duration,
     read_metadata,
-    timestamp_for_frame,
 )
 
 
@@ -19,6 +18,7 @@ from .video_reader import (
 class FrameMetrics:
     sample_index: int
     frame_index: int
+    target_timestamp_seconds: float
     timestamp_seconds: float
     timestamp_formatted: str
     second: int
@@ -59,15 +59,15 @@ class VideoAnalyzer:
 
     def analyze(self, video_path: Path) -> dict[str, Any]:
         metadata = read_metadata(video_path)
-        frame_interval = self._frame_interval(metadata.fps)
-        sampled_indices = list(range(0, metadata.total_frames, frame_interval))
+        sample_period_seconds = 1.0 / self.samples_per_second
 
         frames, failed_samples, reader_diagnostics = self._sample_frames(
             video_path=video_path,
-            frame_interval=frame_interval,
+            sample_period_seconds=sample_period_seconds,
             metadata_total_frames=metadata.total_frames,
             fps=metadata.fps,
         )
+        sampled_indices = [frame.frame_index for frame in frames]
         frame_dicts = [asdict(frame) for frame in frames]
         failed_sample_dicts = [asdict(sample) for sample in failed_samples]
         reader_diagnostics.update(
@@ -86,8 +86,12 @@ class VideoAnalyzer:
             "sampling": {
                 "total_frames": metadata.total_frames,
                 "sampled_frames": len(frames),
+                "sampling_method": "time_based_sampling",
+                "sample_timestamp_source": "cv2.CAP_PROP_POS_MSEC",
+                "timestamp_seconds_definition": "Actual decoded video timestamp from CAP_PROP_POS_MSEC.",
+                "target_timestamp_seconds_definition": "Sample target time: sample_index * sample_period_seconds.",
                 "sampling_rate": self.samples_per_second,
-                "frame_interval": frame_interval,
+                "sample_period_seconds": sample_period_seconds,
                 "first_sampled_frame_index": frames[0].frame_index if frames else None,
                 "last_sampled_frame_index": frames[-1].frame_index if frames else None,
                 "all_requested_frames_read": len(frames) == len(sampled_indices),
@@ -131,13 +135,8 @@ class VideoAnalyzer:
         }
         return scrub_json(report)
 
-    def _frame_interval(self, fps: float) -> int:
-        if fps <= 0:
-            return 1
-        return max(1, int(round(fps / self.samples_per_second)))
-
     def _sample_frames(
-        self, video_path: Path, frame_interval: int, metadata_total_frames: int, fps: float
+        self, video_path: Path, sample_period_seconds: float, metadata_total_frames: int, fps: float
     ) -> tuple[list[FrameMetrics], list[SampleFailure], dict[str, Any]]:
         capture = cv2.VideoCapture(str(video_path))
         frames: list[FrameMetrics] = []
@@ -148,51 +147,60 @@ class VideoAnalyzer:
         first_failed_timestamp_seconds = None
         capture_position_frames_at_failure = None
         capture_position_msec_at_failure = None
+        last_decoded_timestamp_seconds = None
         successful_history: list[tuple[FrameMetrics, np.ndarray]] = []
+        next_sample_number = 0
+        sample_epsilon = 1e-9
         try:
             while True:
                 ok, frame = capture.read()
                 decode_attempt_count += 1
                 if not ok or frame is None:
                     first_failed_frame_index = decoded_frame_count
-                    first_failed_timestamp_seconds = timestamp_for_frame(decoded_frame_count, fps)
                     capture_position_frames_at_failure = float(
                         capture.get(cv2.CAP_PROP_POS_FRAMES) or 0.0
                     )
                     capture_position_msec_at_failure = float(
                         capture.get(cv2.CAP_PROP_POS_MSEC) or 0.0
                     )
+                    first_failed_timestamp_seconds = self._capture_position_timestamp_seconds(capture)
                     break
 
                 frame_index = decoded_frame_count
                 decoded_frame_count += 1
-                if frame_index % frame_interval != 0:
-                    continue
-
-                sample_index = len(frames)
-                metrics, gray = self._analyze_frame(
-                    frame=frame,
-                    sample_index=sample_index,
-                    frame_index=frame_index,
-                    fps=fps,
-                    successful_history=successful_history,
-                )
-                frames.append(metrics)
-                successful_history.append((metrics, gray))
+                actual_timestamp = self._actual_timestamp_seconds(capture)
+                last_decoded_timestamp_seconds = actual_timestamp
+                while actual_timestamp + sample_epsilon >= next_sample_number * sample_period_seconds:
+                    target_timestamp = round(next_sample_number * sample_period_seconds, 6)
+                    sample_index = len(frames)
+                    metrics, gray = self._analyze_frame(
+                        frame=frame,
+                        sample_index=sample_index,
+                        frame_index=frame_index,
+                        target_timestamp_seconds=target_timestamp,
+                        actual_timestamp_seconds=actual_timestamp,
+                        successful_history=successful_history,
+                    )
+                    frames.append(metrics)
+                    successful_history.append((metrics, gray))
+                    next_sample_number += 1
         finally:
             capture.release()
 
         if first_failed_frame_index is not None and first_failed_frame_index < metadata_total_frames:
-            for frame_index in range(first_failed_frame_index, metadata_total_frames):
-                if frame_index % frame_interval == 0:
-                    failed_samples.append(
-                        SampleFailure(
-                            requested_frame_index=frame_index,
-                            expected_timestamp_seconds=timestamp_for_frame(frame_index, fps),
-                            capture_position_frames=capture_position_frames_at_failure or 0.0,
-                            capture_position_msec=capture_position_msec_at_failure or 0.0,
-                        )
+            duration_seconds = metadata_total_frames / fps if fps > 0 else 0.0
+            while next_sample_number * sample_period_seconds <= duration_seconds:
+                failed_samples.append(
+                    SampleFailure(
+                        requested_frame_index=first_failed_frame_index,
+                        expected_timestamp_seconds=round(
+                            next_sample_number * sample_period_seconds, 6
+                        ),
+                        capture_position_frames=capture_position_frames_at_failure or 0.0,
+                        capture_position_msec=capture_position_msec_at_failure or 0.0,
                     )
+                )
+                next_sample_number += 1
 
         expected_last_frame_index = metadata_total_frames - 1 if metadata_total_frames > 0 else None
         last_successful_frame_index = decoded_frame_count - 1 if decoded_frame_count > 0 else None
@@ -223,11 +231,7 @@ class VideoAnalyzer:
             "normal_eof_count": normal_eof_count,
             "unexpected_decode_failure_count": unexpected_decode_failure_count,
             "last_successful_frame_index": last_successful_frame_index,
-            "last_successful_timestamp_seconds": (
-                timestamp_for_frame(last_successful_frame_index, fps)
-                if last_successful_frame_index is not None
-                else None
-            ),
+            "last_successful_timestamp_seconds": last_decoded_timestamp_seconds,
             "first_failed_frame_index": first_failed_frame_index,
             "first_failed_timestamp_seconds": first_failed_timestamp_seconds,
             "capture_position_frames_at_failure": capture_position_frames_at_failure,
@@ -238,16 +242,26 @@ class VideoAnalyzer:
         }
         return frames, failed_samples, diagnostics
 
+    def _actual_timestamp_seconds(self, capture: cv2.VideoCapture) -> float:
+        return round(float(capture.get(cv2.CAP_PROP_POS_MSEC) or 0.0) / 1000.0, 6)
+
+    def _capture_position_timestamp_seconds(self, capture: cv2.VideoCapture) -> float | None:
+        position_msec = float(capture.get(cv2.CAP_PROP_POS_MSEC) or 0.0)
+        if position_msec <= 0:
+            return None
+        return round(position_msec / 1000.0, 6)
+
     def _analyze_frame(
         self,
         frame: np.ndarray,
         sample_index: int,
         frame_index: int,
-        fps: float,
+        target_timestamp_seconds: float,
+        actual_timestamp_seconds: float,
         successful_history: list[tuple[FrameMetrics, np.ndarray]],
     ) -> tuple[FrameMetrics, np.ndarray]:
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        timestamp = timestamp_for_frame(frame_index, fps)
+        timestamp = actual_timestamp_seconds
 
         adjacent = successful_history[-1] if successful_history else None
         if adjacent is None:
@@ -286,6 +300,7 @@ class VideoAnalyzer:
         return FrameMetrics(
             sample_index=sample_index,
             frame_index=frame_index,
+            target_timestamp_seconds=target_timestamp_seconds,
             timestamp_seconds=timestamp,
             timestamp_formatted=format_duration(timestamp),
             second=int(timestamp),
