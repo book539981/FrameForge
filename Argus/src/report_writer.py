@@ -64,9 +64,10 @@ class ReportWriter:
             "| Field | Value |",
             "| --- | --- |",
             f"| Sampling method | {sampling['sampling_method']} |",
-            f"| Sample timestamp source | {sampling['sample_timestamp_source']} |",
-            f"| Timestamp seconds definition | {sampling['timestamp_seconds_definition']} |",
+            f"| Expected sample count | {sampling['expected_sample_count']} |",
+            f"| Analysis timeline definition | {sampling['analysis_timeline_definition']} |",
             f"| Target timestamp seconds definition | {sampling['target_timestamp_seconds_definition']} |",
+            f"| Target frame index definition | {sampling['target_frame_index_definition']} |",
             f"| Sampling rate | {sampling['sampling_rate']:g} samples/second |",
             f"| Sample period seconds | {fmt(sampling['sample_period_seconds'])} |",
             f"| Lookback sample offset | {report['config']['analysis']['lookback_sample_offset']} |",
@@ -152,19 +153,16 @@ class ReportWriter:
         ]
         keys = [
             "metadata_total_frames",
-            "metadata_fps",
             "metadata_duration_seconds",
-            "duration_from_frame_count_seconds",
             "decode_attempt_count",
             "decoded_frame_count",
             "normal_eof_count",
             "unexpected_decode_failure_count",
             "last_successful_frame_index",
-            "last_successful_timestamp_seconds",
+            "last_successful_analysis_timestamp_seconds",
             "first_failed_frame_index",
-            "first_failed_timestamp_seconds",
+            "first_failed_analysis_timestamp_seconds",
             "capture_position_frames_at_failure",
-            "capture_position_msec_at_failure",
             "expected_last_frame_index",
             "missing_tail_frame_count",
             "missing_tail_duration_seconds",
@@ -181,19 +179,19 @@ class ReportWriter:
             return "- No failed samples."
 
         rows = [
-            "| Requested Frame | Expected Timestamp Seconds | Capture Position Frames | Capture Position Msec |",
+            "| Target Grid | Target Timestamp Seconds | Target Frame | Capture Position Frames |",
             "| ---: | ---: | ---: | ---: |",
         ]
         for sample in failed_samples:
             rows.append(
-                f"| {sample['requested_frame_index']} | {fmt(sample['expected_timestamp_seconds'])} | "
-                f"{fmt(sample['capture_position_frames'])} | {fmt(sample['capture_position_msec'])} |"
+                f"| {sample['target_grid_index']} | {fmt(sample['target_timestamp_seconds'])} | "
+                f"{sample['target_frame_index']} | {fmt(sample['capture_position_frames'])} |"
             )
         return "\n".join(rows)
 
     def _per_second_table(self, rows: list[dict[str, Any]]) -> str:
         table = [
-            "| Second | Frame Indices | Samples | Brightness Mean | Contrast Mean | Laplacian Mean | Laplacian Min | Adjacent Difference Mean | Lookback Difference Mean |",
+            "| Analysis Second | Frame Indices | Samples | Brightness Mean | Contrast Mean | Laplacian Mean | Laplacian Min | Adjacent Difference Mean | Lookback Difference Mean |",
             "| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
         ]
         for row in rows:

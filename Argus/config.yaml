@@ -5,10 +5,20 @@ output:
   artifacts_directory: output/artifacts
 
 sampling:
-  samples_per_second: 5
+  samples_per_second: 10
 
 analysis:
-  lookback_sample_offset: 2
+  lookback_sample_offset: 4
+
+stable_candidate:
+  adjacent_difference_maximum: 0.06
+  long_lookback_difference_maximum: 0.01
+
+manual_frame_picker:
+  initial_step_seconds: 0.3
+  minimum_step_seconds: 0.1
+  step_adjustment_seconds: 0.1
+  output_directory: output/pages
 
 report:
   json_filename: video_report.json

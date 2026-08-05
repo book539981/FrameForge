@@ -17,39 +17,42 @@ from .video_reader import (
 @dataclass(frozen=True)
 class FrameMetrics:
     sample_index: int
+    target_grid_index: int
+    target_frame_index: int
     frame_index: int
     target_timestamp_seconds: float
-    timestamp_seconds: float
-    timestamp_formatted: str
-    second: int
+    analysis_timestamp_seconds: float
+    analysis_timestamp_formatted: str
+    analysis_second: int
     brightness_mean: float
     contrast_std: float
     laplacian_variance: float
     adjacent_difference_score: float | None
     adjacent_sample_index: int | None
     adjacent_frame_index: int | None
-    adjacent_timestamp_seconds: float | None
-    adjacent_actual_seconds: float | None
+    adjacent_analysis_timestamp_seconds: float | None
+    adjacent_analysis_delta_seconds: float | None
     lookback_difference_score: float | None
     lookback_sample_offset: int
     lookback_sample_index: int | None
     lookback_frame_index: int | None
-    lookback_timestamp_seconds: float | None
-    lookback_actual_seconds: float | None
+    lookback_analysis_timestamp_seconds: float | None
+    lookback_analysis_delta_seconds: float | None
 
 
 @dataclass(frozen=True)
 class SampleFailure:
-    requested_frame_index: int
-    expected_timestamp_seconds: float
+    target_grid_index: int
+    target_timestamp_seconds: float
+    target_frame_index: int
     capture_position_frames: float
-    capture_position_msec: float
 
 
 class VideoAnalyzer:
     def __init__(self, config: dict[str, Any], argus_root: Path) -> None:
         self.config = config
         self.argus_root = argus_root
+        self.sample_grays: dict[int, np.ndarray] = {}
         self.samples_per_second = float(config["sampling"]["samples_per_second"])
         if self.samples_per_second <= 0:
             raise ValueError("sampling.samples_per_second must be greater than zero")
@@ -60,12 +63,17 @@ class VideoAnalyzer:
     def analyze(self, video_path: Path) -> dict[str, Any]:
         metadata = read_metadata(video_path)
         sample_period_seconds = 1.0 / self.samples_per_second
+        target_grid = self._target_grid(
+            duration_seconds=metadata.duration_seconds,
+            sample_period_seconds=sample_period_seconds,
+            total_frames=metadata.total_frames,
+        )
 
         frames, failed_samples, reader_diagnostics = self._sample_frames(
             video_path=video_path,
-            sample_period_seconds=sample_period_seconds,
             metadata_total_frames=metadata.total_frames,
-            fps=metadata.fps,
+            duration_seconds=metadata.duration_seconds,
+            target_grid=target_grid,
         )
         sampled_indices = [frame.frame_index for frame in frames]
         frame_dicts = [asdict(frame) for frame in frames]
@@ -86,34 +94,35 @@ class VideoAnalyzer:
             "sampling": {
                 "total_frames": metadata.total_frames,
                 "sampled_frames": len(frames),
-                "sampling_method": "time_based_sampling",
-                "sample_timestamp_source": "cv2.CAP_PROP_POS_MSEC",
-                "timestamp_seconds_definition": "Actual decoded video timestamp from CAP_PROP_POS_MSEC.",
-                "target_timestamp_seconds_definition": "Sample target time: sample_index * sample_period_seconds.",
+                "expected_sample_count": len(target_grid),
+                "sampling_method": "uniform_analysis_timeline",
+                "analysis_timeline_definition": "FF standardized analysis timeline: frame_index / (total_frames - 1) * duration_seconds.",
+                "target_timestamp_seconds_definition": "Fixed analysis time grid target: target_grid_index * sample_period_seconds.",
+                "target_frame_index_definition": "round(target_timestamp_seconds / duration_seconds * (total_frames - 1)).",
                 "sampling_rate": self.samples_per_second,
                 "sample_period_seconds": sample_period_seconds,
                 "first_sampled_frame_index": frames[0].frame_index if frames else None,
                 "last_sampled_frame_index": frames[-1].frame_index if frames else None,
-                "all_requested_frames_read": len(frames) == len(sampled_indices),
+                "all_expected_samples_created": len(frames) == len(target_grid),
                 "first_requested_frame_index": sampled_indices[0] if sampled_indices else None,
                 "last_requested_frame_index": sampled_indices[-1] if sampled_indices else None,
                 "first_successful_sample_frame_index": frames[0].frame_index if frames else None,
                 "last_successful_sample_frame_index": frames[-1].frame_index if frames else None,
-                "first_failed_sample_frame_index": failed_samples[0].requested_frame_index
+                "first_failed_sample_frame_index": failed_samples[0].target_frame_index
                 if failed_samples
                 else None,
-                "last_failed_sample_frame_index": failed_samples[-1].requested_frame_index
+                "last_failed_sample_frame_index": failed_samples[-1].target_frame_index
                 if failed_samples
                 else None,
                 "unsampled_tail_frame_count": self._unsampled_tail_frame_count(
                     metadata.total_frames, sampled_indices
                 ),
                 "unsampled_tail_duration_seconds": self._unsampled_tail_duration_seconds(
-                    metadata.fps, metadata.total_frames, sampled_indices
+                    metadata.duration_seconds, metadata.total_frames, sampled_indices
                 ),
                 "failed_tail_frame_count": self._failed_tail_frame_count(failed_samples, frames),
                 "failed_tail_duration_seconds": self._failed_tail_duration_seconds(
-                    metadata.fps, failed_samples, frames
+                    metadata.duration_seconds, metadata.total_frames, failed_samples, frames
                 ),
             },
             "frame_statistics": {
@@ -136,21 +145,24 @@ class VideoAnalyzer:
         return scrub_json(report)
 
     def _sample_frames(
-        self, video_path: Path, sample_period_seconds: float, metadata_total_frames: int, fps: float
+        self,
+        video_path: Path,
+        metadata_total_frames: int,
+        duration_seconds: float,
+        target_grid: list[dict[str, float | int]],
     ) -> tuple[list[FrameMetrics], list[SampleFailure], dict[str, Any]]:
         capture = cv2.VideoCapture(str(video_path))
+        self.sample_grays = {}
         frames: list[FrameMetrics] = []
         failed_samples: list[SampleFailure] = []
         decoded_frame_count = 0
         decode_attempt_count = 0
         first_failed_frame_index = None
-        first_failed_timestamp_seconds = None
+        first_failed_analysis_timestamp_seconds = None
         capture_position_frames_at_failure = None
-        capture_position_msec_at_failure = None
-        last_decoded_timestamp_seconds = None
+        last_decoded_analysis_timestamp_seconds = None
         successful_history: list[tuple[FrameMetrics, np.ndarray]] = []
-        next_sample_number = 0
-        sample_epsilon = 1e-9
+        next_target_grid_index = 0
         try:
             while True:
                 ok, frame = capture.read()
@@ -160,47 +172,65 @@ class VideoAnalyzer:
                     capture_position_frames_at_failure = float(
                         capture.get(cv2.CAP_PROP_POS_FRAMES) or 0.0
                     )
-                    capture_position_msec_at_failure = float(
-                        capture.get(cv2.CAP_PROP_POS_MSEC) or 0.0
+                    first_failed_analysis_timestamp_seconds = self._analysis_timestamp_seconds(
+                        frame_index=first_failed_frame_index,
+                        total_frames=metadata_total_frames,
+                        duration_seconds=duration_seconds,
                     )
-                    first_failed_timestamp_seconds = self._capture_position_timestamp_seconds(capture)
                     break
 
                 frame_index = decoded_frame_count
                 decoded_frame_count += 1
-                actual_timestamp = self._actual_timestamp_seconds(capture)
-                last_decoded_timestamp_seconds = actual_timestamp
-                while actual_timestamp + sample_epsilon >= next_sample_number * sample_period_seconds:
-                    target_timestamp = round(next_sample_number * sample_period_seconds, 6)
+                analysis_timestamp = self._analysis_timestamp_seconds(
+                    frame_index=frame_index,
+                    total_frames=metadata_total_frames,
+                    duration_seconds=duration_seconds,
+                )
+                last_decoded_analysis_timestamp_seconds = analysis_timestamp
+                if next_target_grid_index < len(target_grid):
+                    target = target_grid[next_target_grid_index]
+                    target_frame_index = int(target["target_frame_index"])
+                else:
+                    target = None
+                    target_frame_index = metadata_total_frames + 1
+                if target is not None and frame_index >= target_frame_index:
+                    target_timestamp = float(target["target_timestamp_seconds"])
                     sample_index = len(frames)
                     metrics, gray = self._analyze_frame(
                         frame=frame,
                         sample_index=sample_index,
+                        target_grid_index=int(target["target_grid_index"]),
+                        target_frame_index=target_frame_index,
                         frame_index=frame_index,
                         target_timestamp_seconds=target_timestamp,
-                        actual_timestamp_seconds=actual_timestamp,
+                        analysis_timestamp_seconds=analysis_timestamp,
                         successful_history=successful_history,
                     )
                     frames.append(metrics)
+                    self.sample_grays[sample_index] = gray
                     successful_history.append((metrics, gray))
-                    next_sample_number += 1
+                    next_target_grid_index += 1
+                    while (
+                        next_target_grid_index < len(target_grid)
+                        and int(target_grid[next_target_grid_index]["target_frame_index"])
+                        <= frame_index
+                    ):
+                        next_target_grid_index += 1
         finally:
             capture.release()
 
         if first_failed_frame_index is not None and first_failed_frame_index < metadata_total_frames:
-            duration_seconds = metadata_total_frames / fps if fps > 0 else 0.0
-            while next_sample_number * sample_period_seconds <= duration_seconds:
+            while next_target_grid_index < len(target_grid):
+                target = target_grid[next_target_grid_index]
                 failed_samples.append(
                     SampleFailure(
-                        requested_frame_index=first_failed_frame_index,
-                        expected_timestamp_seconds=round(
-                            next_sample_number * sample_period_seconds, 6
-                        ),
+                        target_grid_index=int(target["target_grid_index"]),
+                        target_timestamp_seconds=float(target["target_timestamp_seconds"]),
+                        target_frame_index=int(target["target_frame_index"]),
                         capture_position_frames=capture_position_frames_at_failure or 0.0,
-                        capture_position_msec=capture_position_msec_at_failure or 0.0,
                     )
                 )
-                next_sample_number += 1
+                next_target_grid_index += 1
 
         expected_last_frame_index = metadata_total_frames - 1 if metadata_total_frames > 0 else None
         last_successful_frame_index = decoded_frame_count - 1 if decoded_frame_count > 0 else None
@@ -216,67 +246,112 @@ class VideoAnalyzer:
             else None
         )
         missing_tail_duration_seconds = (
-            round(missing_tail_frame_count / fps, 6)
-            if missing_tail_frame_count is not None and fps > 0
+            self._frame_count_analysis_duration(
+                frame_count=missing_tail_frame_count,
+                total_frames=metadata_total_frames,
+                duration_seconds=duration_seconds,
+            )
+            if missing_tail_frame_count is not None
             else None
         )
 
         diagnostics = {
             "metadata_total_frames": metadata_total_frames,
-            "metadata_fps": fps,
-            "metadata_duration_seconds": metadata_total_frames / fps if fps > 0 else 0.0,
-            "duration_from_frame_count_seconds": metadata_total_frames / fps if fps > 0 else 0.0,
+            "metadata_duration_seconds": duration_seconds,
             "decode_attempt_count": decode_attempt_count,
             "decoded_frame_count": decoded_frame_count,
             "normal_eof_count": normal_eof_count,
             "unexpected_decode_failure_count": unexpected_decode_failure_count,
             "last_successful_frame_index": last_successful_frame_index,
-            "last_successful_timestamp_seconds": last_decoded_timestamp_seconds,
+            "last_successful_analysis_timestamp_seconds": last_decoded_analysis_timestamp_seconds,
             "first_failed_frame_index": first_failed_frame_index,
-            "first_failed_timestamp_seconds": first_failed_timestamp_seconds,
+            "first_failed_analysis_timestamp_seconds": first_failed_analysis_timestamp_seconds,
             "capture_position_frames_at_failure": capture_position_frames_at_failure,
-            "capture_position_msec_at_failure": capture_position_msec_at_failure,
             "expected_last_frame_index": expected_last_frame_index,
             "missing_tail_frame_count": missing_tail_frame_count,
             "missing_tail_duration_seconds": missing_tail_duration_seconds,
         }
         return frames, failed_samples, diagnostics
 
-    def _actual_timestamp_seconds(self, capture: cv2.VideoCapture) -> float:
-        return round(float(capture.get(cv2.CAP_PROP_POS_MSEC) or 0.0) / 1000.0, 6)
+    def _target_grid(
+        self,
+        duration_seconds: float,
+        sample_period_seconds: float,
+        total_frames: int,
+    ) -> list[dict[str, float | int]]:
+        if duration_seconds < 0 or sample_period_seconds <= 0 or total_frames <= 0:
+            return []
 
-    def _capture_position_timestamp_seconds(self, capture: cv2.VideoCapture) -> float | None:
-        position_msec = float(capture.get(cv2.CAP_PROP_POS_MSEC) or 0.0)
-        if position_msec <= 0:
-            return None
-        return round(position_msec / 1000.0, 6)
+        target_grid: list[dict[str, float | int]] = []
+        target_grid_index = 0
+        sample_epsilon = 1e-9
+        while target_grid_index * sample_period_seconds <= duration_seconds + sample_epsilon:
+            target_timestamp = round(target_grid_index * sample_period_seconds, 6)
+            target_frame_index = self._target_frame_index(
+                target_timestamp_seconds=target_timestamp,
+                duration_seconds=duration_seconds,
+                total_frames=total_frames,
+            )
+            target_grid.append(
+                {
+                    "target_grid_index": target_grid_index,
+                    "target_timestamp_seconds": target_timestamp,
+                    "target_frame_index": target_frame_index,
+                }
+            )
+            target_grid_index += 1
+        return target_grid
+
+    def _target_frame_index(
+        self,
+        target_timestamp_seconds: float,
+        duration_seconds: float,
+        total_frames: int,
+    ) -> int:
+        if duration_seconds <= 0 or total_frames <= 1:
+            return 0
+        return int(round(target_timestamp_seconds / duration_seconds * (total_frames - 1)))
+
+    def _analysis_timestamp_seconds(
+        self,
+        frame_index: int,
+        total_frames: int,
+        duration_seconds: float,
+    ) -> float:
+        if total_frames <= 1:
+            return 0.0
+        return round(frame_index / (total_frames - 1) * duration_seconds, 6)
 
     def _analyze_frame(
         self,
         frame: np.ndarray,
         sample_index: int,
+        target_grid_index: int,
+        target_frame_index: int,
         frame_index: int,
         target_timestamp_seconds: float,
-        actual_timestamp_seconds: float,
+        analysis_timestamp_seconds: float,
         successful_history: list[tuple[FrameMetrics, np.ndarray]],
     ) -> tuple[FrameMetrics, np.ndarray]:
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        timestamp = actual_timestamp_seconds
+        analysis_timestamp = analysis_timestamp_seconds
 
         adjacent = successful_history[-1] if successful_history else None
         if adjacent is None:
             adjacent_difference_score = None
             adjacent_sample_index = None
             adjacent_frame_index = None
-            adjacent_timestamp_seconds = None
-            adjacent_actual_seconds = None
+            adjacent_analysis_timestamp_seconds = None
+            adjacent_analysis_delta_seconds = None
         else:
             adjacent_metrics, adjacent_gray = adjacent
             adjacent_difference_score = normalized_mean_absolute_difference(adjacent_gray, gray)
             adjacent_sample_index = adjacent_metrics.sample_index
             adjacent_frame_index = adjacent_metrics.frame_index
-            adjacent_timestamp_seconds = adjacent_metrics.timestamp_seconds
-            adjacent_actual_seconds = round(timestamp - adjacent_metrics.timestamp_seconds, 6)
+            adjacent_analysis_timestamp_seconds = adjacent_metrics.analysis_timestamp_seconds
+            adjacent_analysis_delta_seconds = round(
+                analysis_timestamp - adjacent_metrics.analysis_timestamp_seconds, 6
+            )
 
         lookback = (
             successful_history[-self.lookback_sample_offset]
@@ -287,37 +362,41 @@ class VideoAnalyzer:
             lookback_difference_score = None
             lookback_sample_index = None
             lookback_frame_index = None
-            lookback_timestamp_seconds = None
-            lookback_actual_seconds = None
+            lookback_analysis_timestamp_seconds = None
+            lookback_analysis_delta_seconds = None
         else:
             lookback_metrics, lookback_gray = lookback
             lookback_difference_score = normalized_mean_absolute_difference(lookback_gray, gray)
             lookback_sample_index = lookback_metrics.sample_index
             lookback_frame_index = lookback_metrics.frame_index
-            lookback_timestamp_seconds = lookback_metrics.timestamp_seconds
-            lookback_actual_seconds = round(timestamp - lookback_metrics.timestamp_seconds, 6)
+            lookback_analysis_timestamp_seconds = lookback_metrics.analysis_timestamp_seconds
+            lookback_analysis_delta_seconds = round(
+                analysis_timestamp - lookback_metrics.analysis_timestamp_seconds, 6
+            )
 
         return FrameMetrics(
             sample_index=sample_index,
+            target_grid_index=target_grid_index,
+            target_frame_index=target_frame_index,
             frame_index=frame_index,
             target_timestamp_seconds=target_timestamp_seconds,
-            timestamp_seconds=timestamp,
-            timestamp_formatted=format_duration(timestamp),
-            second=int(timestamp),
+            analysis_timestamp_seconds=analysis_timestamp,
+            analysis_timestamp_formatted=format_duration(analysis_timestamp),
+            analysis_second=int(analysis_timestamp),
             brightness_mean=float(np.mean(gray)),
             contrast_std=float(np.std(gray)),
             laplacian_variance=float(cv2.Laplacian(gray, cv2.CV_64F).var()),
             adjacent_difference_score=adjacent_difference_score,
             adjacent_sample_index=adjacent_sample_index,
             adjacent_frame_index=adjacent_frame_index,
-            adjacent_timestamp_seconds=adjacent_timestamp_seconds,
-            adjacent_actual_seconds=adjacent_actual_seconds,
+            adjacent_analysis_timestamp_seconds=adjacent_analysis_timestamp_seconds,
+            adjacent_analysis_delta_seconds=adjacent_analysis_delta_seconds,
             lookback_difference_score=lookback_difference_score,
             lookback_sample_offset=self.lookback_sample_offset,
             lookback_sample_index=lookback_sample_index,
             lookback_frame_index=lookback_frame_index,
-            lookback_timestamp_seconds=lookback_timestamp_seconds,
-            lookback_actual_seconds=lookback_actual_seconds,
+            lookback_analysis_timestamp_seconds=lookback_analysis_timestamp_seconds,
+            lookback_analysis_delta_seconds=lookback_analysis_delta_seconds,
         ), gray
 
     def _unsampled_tail_frame_count(
@@ -329,12 +408,16 @@ class VideoAnalyzer:
         return max(0, expected_last_frame_index - sampled_indices[-1])
 
     def _unsampled_tail_duration_seconds(
-        self, fps: float, total_frames: int, sampled_indices: list[int]
+        self, duration_seconds: float, total_frames: int, sampled_indices: list[int]
     ) -> float | None:
         tail_frames = self._unsampled_tail_frame_count(total_frames, sampled_indices)
-        if tail_frames is None or fps <= 0:
+        if tail_frames is None:
             return None
-        return round(tail_frames / fps, 6)
+        return self._frame_count_analysis_duration(
+            frame_count=tail_frames,
+            total_frames=total_frames,
+            duration_seconds=duration_seconds,
+        )
 
     def _failed_tail_frame_count(
         self, failed_samples: list[SampleFailure], frames: list[FrameMetrics]
@@ -342,19 +425,35 @@ class VideoAnalyzer:
         if not failed_samples:
             return 0
         last_successful_sample = frames[-1].frame_index if frames else -1
-        return sum(1 for sample in failed_samples if sample.requested_frame_index > last_successful_sample)
+        return sum(1 for sample in failed_samples if sample.target_frame_index > last_successful_sample)
 
     def _failed_tail_duration_seconds(
-        self, fps: float, failed_samples: list[SampleFailure], frames: list[FrameMetrics]
+        self,
+        duration_seconds: float,
+        total_frames: int,
+        failed_samples: list[SampleFailure],
+        frames: list[FrameMetrics],
     ) -> float | None:
-        if fps <= 0:
+        return self._frame_count_analysis_duration(
+            frame_count=self._failed_tail_frame_count(failed_samples, frames),
+            total_frames=total_frames,
+            duration_seconds=duration_seconds,
+        )
+
+    def _frame_count_analysis_duration(
+        self,
+        frame_count: int,
+        total_frames: int,
+        duration_seconds: float,
+    ) -> float | None:
+        if total_frames <= 1:
             return None
-        return round(self._failed_tail_frame_count(failed_samples, frames) / fps, 6)
+        return round(frame_count / (total_frames - 1) * duration_seconds, 6)
 
     def _per_second_summary(self, frames: list[FrameMetrics]) -> list[dict[str, Any]]:
         grouped: dict[int, list[FrameMetrics]] = defaultdict(list)
         for frame in frames:
-            grouped[frame.second].append(frame)
+            grouped[frame.analysis_second].append(frame)
 
         rows: list[dict[str, Any]] = []
         for second in sorted(grouped):
