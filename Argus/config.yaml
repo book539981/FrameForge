@@ -18,6 +18,7 @@ manual_frame_picker:
   initial_step_seconds: 0.3
   minimum_step_seconds: 0.1
   step_adjustment_seconds: 0.1
+  page_jump_seconds: 2.0
   output_directory: output/pages
 
 report:

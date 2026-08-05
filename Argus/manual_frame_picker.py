@@ -32,6 +32,7 @@ class ManualFramePicker:
         initial_step_seconds: float,
         minimum_step_seconds: float,
         step_adjustment_seconds: float,
+        page_jump_seconds: float,
     ) -> None:
         self.root = root
         self.video_path = video_path
@@ -39,6 +40,7 @@ class ManualFramePicker:
         self.step_seconds = initial_step_seconds
         self.minimum_step_seconds = minimum_step_seconds
         self.step_adjustment_seconds = step_adjustment_seconds
+        self.page_jump_seconds = page_jump_seconds
         self.capture = cv2.VideoCapture(str(video_path))
         self.metadata = read_metadata(video_path)
         self.duration_seconds = self.metadata.duration_seconds
@@ -94,10 +96,13 @@ class ManualFramePicker:
 
         self.root.bind("<Left>", self.on_left)
         self.root.bind("<Right>", self.on_right)
-        self.root.bind("<Up>", self.on_up)
-        self.root.bind("<Down>", self.on_down)
+        self.root.bind("<Shift-Left>", self.on_shift_left)
+        self.root.bind("<Shift-Right>", self.on_shift_right)
+        self.root.bind("<Control-Left>", self.on_control_left)
+        self.root.bind("<Control-Right>", self.on_control_right)
         self.root.bind("<Home>", self.on_home)
         self.root.bind("<End>", self.on_end)
+        self.root.bind("<Return>", self.on_enter)
         self.root.bind("<Escape>", self.on_escape)
         self.root.bind("<KeyPress-space>", self.on_space_press)
         self.root.bind("<KeyRelease-space>", self.on_space_release)
@@ -106,26 +111,22 @@ class ManualFramePicker:
         self.seek_to_time(0.0)
 
     def on_left(self, _event: tk.Event) -> None:
-        self.seek_to_time(max(0.0, self.current_time_seconds - self.step_seconds))
+        self.move_frames(-1)
 
     def on_right(self, _event: tk.Event) -> None:
-        self.seek_to_time(
-            min(self.duration_seconds, self.current_time_seconds + self.step_seconds)
-        )
+        self.move_frames(1)
 
-    def on_up(self, _event: tk.Event) -> None:
-        self.step_seconds = round(self.step_seconds + self.step_adjustment_seconds, 1)
-        self.update_status()
+    def on_shift_left(self, _event: tk.Event) -> None:
+        self.move_frames(-10)
 
-    def on_down(self, _event: tk.Event) -> None:
-        self.step_seconds = round(
-            max(
-                self.minimum_step_seconds,
-                self.step_seconds - self.step_adjustment_seconds,
-            ),
-            1,
-        )
-        self.update_status()
+    def on_shift_right(self, _event: tk.Event) -> None:
+        self.move_frames(10)
+
+    def on_control_left(self, _event: tk.Event) -> None:
+        self.move_frames(-50)
+
+    def on_control_right(self, _event: tk.Event) -> None:
+        self.move_frames(50)
 
     def on_home(self, _event: tk.Event) -> None:
         self.seek_to_time(0.0)
@@ -145,12 +146,22 @@ class ManualFramePicker:
     def on_space_release(self, _event: tk.Event) -> None:
         self.space_pressed = False
 
+    def on_enter(self, _event: tk.Event) -> None:
+        saved = self.save_current_frame()
+        if saved:
+            self.seek_to_time(
+                min(self.duration_seconds, self.current_time_seconds + self.page_jump_seconds)
+            )
+
     def on_resize(self, _event: tk.Event) -> None:
         self.update_preview()
 
     def seek_to_time(self, target_time_seconds: float) -> None:
         frame_index = int(round(target_time_seconds * self.fps))
         self.seek_to_frame(frame_index)
+
+    def move_frames(self, frame_delta: int) -> None:
+        self.seek_to_frame(self.current_frame_index + frame_delta)
 
     def seek_to_frame(self, frame_index: int) -> None:
         target_frame = min(max(0, frame_index), self.total_frames - 1)
@@ -206,7 +217,7 @@ class ManualFramePicker:
             text=(
                 f"{saved_text}：{self.last_saved_filename}"
                 if saved_text and self.last_saved_filename
-                else "空白鍵截圖，左右鍵巡覽，上下鍵調整步進"
+                else "左右鍵逐幀｜Shift ±10｜Ctrl ±50｜空白鍵截圖｜Enter 截圖並跳下一頁"
             )
         )
         self.status_label.configure(
@@ -218,29 +229,30 @@ class ManualFramePicker:
                 f"目前 Frame Index / Total Frames：{self.current_frame_index} / "
                 f"{self.total_frames - 1}\n"
                 f"目前進度：{progress_percent:.2f}%\n"
-                f"目前幀率：{self.fps:.3f} FPS\n"
-                f"目前 Step Seconds：{self.step_seconds:.1f}\n"
-                f"已保存頁數：{self.saved_page_count}\n"
-                f"最後保存檔名：{self.last_saved_filename or '-'}"
+                f"FPS：{self.fps:.3f}\n"
+                f"Saved：{self.saved_page_count}\n"
+                f"Next：page_{self.next_page_number:03d}.png\n"
+                f"Page Jump：{self.page_jump_seconds:.1f} 秒"
             )
         )
         if saved_text:
             self.root.after(700, self.update_status)
 
-    def save_current_frame(self) -> None:
+    def save_current_frame(self) -> bool:
         if self.current_frame is None:
-            return
+            return False
         self.output_dir.mkdir(parents=True, exist_ok=True)
         image_path = self.next_output_path()
         ok = cv2.imwrite(str(image_path), self.current_frame)
         if not ok:
             messagebox.showerror("Save failed", f"Could not write {image_path}")
-            return
+            return False
         self.last_saved_filename = image_path.name
         self.saved_message_until = time.monotonic() + 0.7
         self.next_page_number += 1
         self.saved_page_count += 1
         self.update_status()
+        return True
 
     def next_output_path(self) -> Path:
         while True:
@@ -308,6 +320,7 @@ def main() -> int:
             initial_step_seconds=float(picker_config["initial_step_seconds"]),
             minimum_step_seconds=float(picker_config["minimum_step_seconds"]),
             step_adjustment_seconds=float(picker_config["step_adjustment_seconds"]),
+            page_jump_seconds=float(picker_config["page_jump_seconds"]),
         )
         root.mainloop()
         return 0
