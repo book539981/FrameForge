@@ -1,57 +1,41 @@
 # Argus
 
-Argus is the FF Video Analyzer.
+Argus is the current FF M2 runtime for automatic page extraction.
 
-## Current Milestone
-
-```text
-M2 architecture alignment
-Analyzer semantic correction
-```
-
-Argus reads one video from `input`, decodes frames sequentially, builds a sample sequence through the Sampling layer, computes frame metrics, and writes facts to JSON and Markdown reports.
-
-## Analyzer Workflow
+## Runtime Flow
 
 ```text
+Video
+↓
 Sequential Decode
-
 ↓
-
-Time-based Sampling
-
+Frame Timeline Analyzer
 ↓
-
-Frame Metrics Analysis
-
+Page Change Rule
 ↓
-
-Facts Output
+Timestamp-based Event Merge
+↓
+Page Segment Builder
+↓
+Laplacian Representative Selector
+↓
+PNG Export
 ```
 
-## Frame Metrics Facts
+## Current Facts
 
-Current frame metrics:
+- `frame_index`
+- `decoded_timestamp_seconds`
+- `changed_area_ratio`
+- `ssim`
+- `ecc_converged`
+- `ecc_score`
+- `ecc_dx`
+- `ecc_dy`
+- `laplacian_variance`
 
-- Brightness mean
-- Contrast standard deviation
-- Laplacian variance
-- Adjacent difference score against the previous successful sample
-- Lookback difference score against the sample `analysis.lookback_sample_offset` positions earlier
+## Artifacts
 
-Reader diagnostics record metadata-derived duration, sequential decode results, sample request ranges, EOF status, and failed sample requests.
-
-Analyzer does not perform Stable decisions, thresholds, rules, state transitions, or representative frame selection.
-
-## Run
-
-```powershell
-python .\Argus\argus.py
-```
-
-Reports are written to:
-
-```text
-Argus/output/artifacts/video_report.json
-Argus/output/artifacts/video_report.md
-```
+- `output/artifacts/frame_difference_timeline.*`
+- `output/artifacts/page_change_events.*`
+- `output/page_export/page_*.png`

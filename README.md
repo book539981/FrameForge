@@ -1,20 +1,35 @@
 # FF - FrameForge
 
-FF 是影片教材數位化專案。
+FF is a video-to-page extraction project.
 
-目前核心引擎為 Argus。
+## Current Milestone
 
-## Current Phase
+```text
+M2 | Automatic Page Extraction
+```
 
-Argus / M2 架構語意校正：
+## Current Runtime
 
-1. 讀取單一輸入影片
-2. Sequential Decode
-3. Time-based Sampling
-4. Frame Metrics Analysis
-5. 輸出 Facts JSON report
-6. 輸出 Facts Markdown report
+```text
+Input Video
+↓
+Sequential Decode
+↓
+Frame Timeline Facts
+↓
+Page Change Rule
+↓
+Page Change Event Merge
+↓
+Page Segment Build
+↓
+Representative Selection
+↓
+page_export PNG
+```
 
-## Engines
+Run:
 
-- Argus：Video Analyzer facts output
+```powershell
+python .\Argus\argus.py
+```

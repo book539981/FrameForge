@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 
-class FrameDifferenceTimelineReportWriter:
+class FrameTimelineReportWriter:
     def __init__(self, artifacts_dir: Path) -> None:
         self.artifacts_dir = artifacts_dir
 
@@ -29,25 +29,14 @@ class FrameDifferenceTimelineReportWriter:
             "frame_index",
             "previous_frame_index",
             "decoded_timestamp_seconds",
-            "difference_mean",
-            "changed_pixel_count",
-            "total_pixel_count",
             "changed_area_ratio",
-            "laplacian_variance",
             "ssim",
-            "binary_pixel_change_count",
-            "binary_pixel_change_ratio",
-            "phase_dx",
-            "phase_dy",
-            "phase_response",
             "ecc_converged",
             "ecc_score",
             "ecc_dx",
             "ecc_dy",
             "ecc_error",
-            "post_alignment_difference_mean",
-            "post_alignment_changed_area_ratio",
-            "post_alignment_ssim",
+            "laplacian_variance",
         ]
         with csv_path.open("w", encoding="utf-8", newline="") as handle:
             writer = csv.DictWriter(handle, fieldnames=fieldnames)
@@ -72,15 +61,11 @@ class FrameDifferenceTimelineReportWriter:
             f"| Total Frames Metadata | {metadata['total_frames']} |",
             f"| Decoded Frame Count | {summary['decoded_frame_count']} |",
             f"| Frame Fact Count | {summary['frame_fact_count']} |",
-            f"| Page Change Rule | {summary['has_page_change_rule']} |",
-            f"| Threshold | {summary['has_threshold']} |",
-            f"| Long Lookback | {summary['has_long_lookback']} |",
-            f"| Stable Rule | {summary['has_stable_rule']} |",
             "",
             "## First 20 Frames",
             "",
-            "| Frame | Previous | Timestamp | Changed Area Ratio | SSIM | Phase dx | Phase dy | Phase Response | ECC Converged | ECC Score | ECC dx | ECC dy | Post Align Diff | Post Align Changed Area | Post Align SSIM | Binary Pixel Change Count | Binary Pixel Change Ratio | Laplacian |",
-            "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+            "| Frame | Previous | Timestamp | Changed Area Ratio | SSIM | ECC Converged | ECC Score | ECC dx | ECC dy | Laplacian |",
+            "| ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: |",
         ]
         for frame in report["frames"][:20]:
             lines.append(
@@ -88,18 +73,10 @@ class FrameDifferenceTimelineReportWriter:
                 f"{fmt(frame['decoded_timestamp_seconds'])} | "
                 f"{fmt(frame['changed_area_ratio'])} | "
                 f"{fmt(frame['ssim'])} | "
-                f"{fmt(frame['phase_dx'])} | "
-                f"{fmt(frame['phase_dy'])} | "
-                f"{fmt(frame['phase_response'])} | "
                 f"{fmt(frame['ecc_converged'])} | "
                 f"{fmt(frame['ecc_score'])} | "
                 f"{fmt(frame['ecc_dx'])} | "
                 f"{fmt(frame['ecc_dy'])} | "
-                f"{fmt(frame['post_alignment_difference_mean'])} | "
-                f"{fmt(frame['post_alignment_changed_area_ratio'])} | "
-                f"{fmt(frame['post_alignment_ssim'])} | "
-                f"{fmt(frame['binary_pixel_change_count'])} | "
-                f"{fmt(frame['binary_pixel_change_ratio'])} | "
                 f"{fmt(frame['laplacian_variance'])} |"
             )
         lines.append("")

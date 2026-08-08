@@ -7,13 +7,14 @@ from pathlib import Path
 
 import yaml
 
-from src.frame_difference_timeline_analyzer import FrameDifferenceTimelineAnalyzer
-from src.frame_difference_timeline_report_writer import (
-    FrameDifferenceTimelineReportWriter,
-)
-from src.minimal_page_change_processor import MinimalPageChangeProcessor
+from src.frame_timeline_analyzer import FrameTimelineAnalyzer
+from src.frame_timeline_report_writer import FrameTimelineReportWriter
+from src.page_change_event_merger import PageChangeEventMerger
 from src.page_change_events_report_writer import PageChangeEventsReportWriter
+from src.page_change_rule import PageChangeRule
 from src.page_exporter import PageExporter
+from src.page_segment_builder import PageSegmentBuilder
+from src.representative_selector import RepresentativeSelector
 from src.video_reader import find_single_video
 
 
@@ -39,16 +40,32 @@ def main() -> int:
         artifacts_dir.mkdir(parents=True, exist_ok=True)
 
         video_path = find_single_video(input_dir)
-        report = FrameDifferenceTimelineAnalyzer().analyze(video_path)
+        report = FrameTimelineAnalyzer().analyze(video_path)
         page_change_config = config["page_change"]
-        page_change_report = MinimalPageChangeProcessor(page_change_config).process(
-            report["frames"]
-        )
+        page_change_rule = PageChangeRule(page_change_config)
+        event_merger = PageChangeEventMerger(page_change_rule, page_change_config)
+        events = event_merger.merge(report["frames"])
+        page_segments = PageSegmentBuilder().build(report["frames"], events)
+        pages = RepresentativeSelector().select(report["frames"], page_segments)
+        page_change_report = {
+            "rule": {
+                **page_change_rule.summary(),
+                **event_merger.summary(),
+                "representative_frame_rule": "For each Page Segment, select the frame with maximum laplacian_variance.",
+            },
+            "events": events,
+            "pages": pages,
+            "summary": {
+                "page_change_event_count": len(events),
+                "representative_count": len(pages),
+                "exported_page_count": len(pages),
+            },
+        }
         (
             json_path,
             csv_path,
             markdown_path,
-        ) = FrameDifferenceTimelineReportWriter(artifacts_dir=artifacts_dir).write(
+        ) = FrameTimelineReportWriter(artifacts_dir=artifacts_dir).write(
             report
         )
         (
@@ -84,10 +101,6 @@ def main() -> int:
         print("Frame Difference Facts:")
         print(f"  {summary['decoded_frame_count']} decoded frames")
         print(f"  {summary['frame_fact_count']} frame facts")
-        print(f"  Page Change Rule: {summary['has_page_change_rule']}")
-        print(f"  Threshold: {summary['has_threshold']}")
-        print(f"  Long Lookback: {summary['has_long_lookback']}")
-        print(f"  Stable Rule: {summary['has_stable_rule']}")
         print()
         print("Reports:")
         print(f"  {json_path.relative_to(argus_root)}")

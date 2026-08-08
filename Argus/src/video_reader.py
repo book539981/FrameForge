@@ -87,6 +87,3 @@ def read_metadata(video_path: Path) -> VideoMetadata:
         )
     finally:
         capture.release()
-
-def timestamp_for_frame(frame_index: int, fps: float) -> float:
-    return round(frame_index / fps, 6) if fps > 0 else 0.0

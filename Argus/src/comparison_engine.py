@@ -1,29 +1,22 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
-
 import cv2
 import numpy as np
 
 
-@dataclass(frozen=True)
-class ComparisonResult:
-    difference_score: float
-    ssim_score: float
-
-
-class ComparisonEngine:
-    def compare(self, image_a: np.ndarray, image_b: np.ndarray) -> dict[str, float]:
-        return asdict(
-            ComparisonResult(
-                difference_score=normalized_mean_absolute_difference(image_a, image_b),
-                ssim_score=ssim_score(image_a, image_b),
-            )
-        )
-
-
 def normalized_mean_absolute_difference(image_a: np.ndarray, image_b: np.ndarray) -> float:
     return float(np.mean(cv2.absdiff(image_a, image_b))) / 255.0
+
+
+def changed_pixel_count(image_a: np.ndarray, image_b: np.ndarray) -> int:
+    return int(np.count_nonzero(cv2.absdiff(image_a, image_b)))
+
+
+def changed_area_ratio(image_a: np.ndarray, image_b: np.ndarray) -> float | None:
+    total_pixel_count = int(image_a.size)
+    if not total_pixel_count:
+        return None
+    return changed_pixel_count(image_a, image_b) / total_pixel_count
 
 
 def ssim_score(image_a: np.ndarray, image_b: np.ndarray) -> float:
