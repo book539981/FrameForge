@@ -1,6 +1,6 @@
 # FF Project Reference（FF 專案參考文件）
 
-Version：V1.0（Formal）
+Version：V2.0（Formal）
 
 ---
 
@@ -20,7 +20,7 @@ Video Analyzer
 ↓
 
 M2
-Stable Page Extraction
+Automatic Page Extraction
 
 ↓
 
@@ -55,31 +55,28 @@ Video
 
 ↓
 
-Video Reader
+Sequential Decode
 
 ↓
 
-Frame Sampling
+Adjacent Frame Comparison
 
 ↓
 
-Metrics
+Facts
 
-Difference
-Lookback Difference
+Difference Mean
+Changed Area Ratio
 Laplacian
+SSIM（Observation）
 
 ↓
 
-Analyzer
+Page Change Detection
 
 ↓
 
-Bryan 驗證
-
-↓
-
-Stable Page Extraction
+Representative Frame
 
 ↓
 
@@ -173,9 +170,10 @@ Analyzer 保留下來、
 
 例如：
 
-* Difference
-* Lookback Difference
+* Difference Mean
+* Changed Area Ratio
 * Laplacian
+* SSIM
 
 ---
 
@@ -197,19 +195,19 @@ Analyzer 保留下來、
 
 ---
 
-## Stable Region
+## Page Change Event
 
-影片中，
+由連續 Frame Change
 
-畫面保持穩定的一段區間。
+合併後形成的一次換頁事件。
 
 ---
 
-## Best Frame
+## Representative Frame
 
-Stable Region 中，
+同一個 Page Change Event
 
-經 Rule 選出的最佳影格。
+最終輸出的代表圖片。
 
 ---
 
