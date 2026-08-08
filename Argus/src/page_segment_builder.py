@@ -24,6 +24,15 @@ class PageSegmentBuilder:
                         previous_event=previous_event,
                     )
                 )
+            elif previous_event is not None:
+                pages.append(
+                    build_page_segment(
+                        page_index=len(pages) + 1,
+                        start_frame=previous_event["end_frame"],
+                        end_frame=previous_event["end_frame"],
+                        previous_event=previous_event,
+                    )
+                )
             page_start = event["end_frame"] + 1
             previous_event = event
 
