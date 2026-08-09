@@ -1,0 +1,34 @@
+{
+  "rule": {
+    "page_change_condition": "Decision Tree: changed_area_ratio <= changed_area_ratio_threshold => Same Page; otherwise ssim < ssim_threshold => Page Change; otherwise ECC Translation decides Same Page only when ecc_converged is true, ecc_score >= ecc_score_minimum, abs(ecc_dx) <= alignment_translation_maximum_pixels, and abs(ecc_dy) <= alignment_translation_maximum_pixels.",
+    "changed_area_ratio_threshold": 0.1,
+    "ssim_threshold": 0.5,
+    "ecc_score_minimum": 0.9,
+    "alignment_translation_maximum_pixels": 2.0,
+    "event_merge_gap_seconds": 0.3,
+    "merge_rule": "Positive Page Change frames are merged into one Page Change Event only when the actual decoded timestamp gap from the previous positive Change Frame is <= event_merge_gap_seconds.",
+    "representative_frame_rule": "For each Page Segment, select the frame with maximum laplacian_variance."
+  },
+  "events": [],
+  "pages": [
+    {
+      "page_index": 1,
+      "start_frame": 0,
+      "end_frame": 23,
+      "frame_count": 24,
+      "changed_area_peak": null,
+      "ssim_minimum": null,
+      "ecc_score_minimum": null,
+      "ecc_dx_at_score_minimum": null,
+      "ecc_dy_at_score_minimum": null,
+      "source_event_index": null,
+      "representative_frame": 3,
+      "laplacian_variance": 3865.7273697916667
+    }
+  ],
+  "summary": {
+    "page_change_event_count": 0,
+    "representative_count": 1,
+    "exported_page_count": 1
+  }
+}

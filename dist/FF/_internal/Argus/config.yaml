@@ -1,0 +1,13 @@
+input:
+  directory: input
+
+output:
+  artifacts_directory: output/artifacts
+
+page_change:
+  changed_area_ratio_threshold: 0.10
+  ssim_threshold: 0.50
+  ecc_score_minimum: 0.90
+  alignment_translation_maximum_pixels: 2.0
+  event_merge_gap_seconds: 0.3
+  output_directory: output/page_export
