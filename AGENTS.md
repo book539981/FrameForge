@@ -18,10 +18,10 @@ Before any implementation:
    Proto/FF_Constitution.md
 
 2. Read:
-   Proto/FF_Dev_Workflow_V3.0.md
+   Proto/FF_Dev_Workflow_V4.0.md
 
 3. Read:
-   Proto/FF_Project_Reference_V3.0.md
+   Proto/FF_Project_Reference_V4.0.md
 
 4. Confirm:
 

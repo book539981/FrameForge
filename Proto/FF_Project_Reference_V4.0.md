@@ -1,12 +1,11 @@
 # FF Project Reference（FF 專案參考文件）
 
-Version：V3.0（Formal）
+Version：V4.0（Formal）
 
 ---
 
 # 一、Milestone Roadmap
 
-```text
 M0
 Project Bootstrap
 ✅ Closed
@@ -38,13 +37,11 @@ Markdown Export
 
 M5
 Book Export
-```
 
 ---
 
 # 二、Current Architecture
 
-```text
 Video
 ↓
 Sequential Decode
@@ -64,18 +61,18 @@ page_xxx.png
 OCR
 ↓
 Text Result
-```
+↓
+Markdown Export
 
-目前 M2 正式輸出：
+目前 M3 已封版。
 
-```text
-page_export/
-page_001.png
-page_002.png
-...
-```
+M3 正式 Output：
 
-上述圖片為 M3 OCR 的正式 Input。
+OCR Text Result
+
+上述文字結果為 M4 Markdown Export 的正式 Input。
+
+M3 的 Raw OCR Facts 與 OCR Capability 保留為已完成能力；M4 不預設沿用任何尚未確認的 Cleanup、Layout、Correction 或 Chapter Reconstruction Rule。
 
 ---
 
@@ -144,5 +141,3 @@ Page Segment 最終選出的代表圖片。
 
 **Debug Report**
 供分析、驗證與除錯使用，不屬正式成果。
-
----
