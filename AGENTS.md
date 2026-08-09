@@ -18,10 +18,10 @@ Before any implementation:
    Proto/FF_Constitution.md
 
 2. Read:
-   Proto/FF_Dev_Workflow.md
+   Proto/FF_Dev_Workflow_V3.0.md
 
 3. Read:
-   Proto/FF_Project_Reference.md
+   Proto/FF_Project_Reference_V3.0.md
 
 4. Confirm:
 
@@ -34,6 +34,45 @@ If any Rule is missing:
 STOP.
 
 Do not write code first.
+
+# Environment and Git Ownership
+
+Project environment and Git are owned and managed by Bryan.
+
+Coding Agent must not:
+
+- create a new venv
+- delete an existing venv
+- rebuild or repair the project environment
+- replace the project Python runtime
+- modify global Python installation
+- initialize Git
+- create or switch branches
+- commit, reset, clean, stash, merge, rebase, or otherwise modify Git state
+
+If the Coding Agent runtime, sandbox, or bundled Python cannot access or activate the project environment:
+
+Do NOT conclude that the project environment is broken.
+
+First treat it as a runtime boundary or sandbox limitation.
+
+STOP and report:
+
+RUNTIME ENVIRONMENT LIMITATION
+
+Explain:
+
+- what command failed
+- which runtime executed it
+- what project path or interpreter could not be accessed
+- what evidence exists
+- what has NOT been verified
+
+Do not repair, delete, or rebuild the environment unless Bryan explicitly instructs it.
+
+If a task requires temporary dependencies inside the Coding Agent's own bundled runtime, ask Bryan for permission first.
+
+Such temporary installation must not be treated as a change to the project's formal runtime.
 
 ---
 
