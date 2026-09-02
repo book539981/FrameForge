@@ -37,6 +37,8 @@ Argus/output/artifacts/*
 Argus/output/debug/*
 Argus/output/temp/*
 Argus/output/pages/*
+Argus/output/page_export/*
+!Argus/output/page_export/.gitkeep
 !Argus/output/artifacts/.gitkeep
 !Argus/output/debug/.gitkeep
 !Argus/output/temp/.gitkeep

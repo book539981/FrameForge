@@ -1,8 +1,0 @@
-PASS
-argus_root=D:\TTT\FF\dist\FF\Argus
-model_root=D:\TTT\FF\dist\FF\_internal\Argus\output\artifacts\ocr_calibration\models
-page_export=D:\TTT\FF\dist\FF\Argus\output\page_export
-ocr_output=D:\TTT\FF\dist\FF\Argus\output\page_export\raw_ocr_text.txt
-m2_progress_events=8
-ocr_progress_events=6
-cancel_progress_events=3

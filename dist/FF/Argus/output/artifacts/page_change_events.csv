@@ -1,2 +1,0 @@
-page_index,start_frame,end_frame,representative_frame,laplacian_variance,changed_area_peak,ssim_minimum,ecc_score_minimum,ecc_dx_at_score_minimum,ecc_dy_at_score_minimum,source_event_index,frame_count
-1,0,23,3,3865.7273697916667,,,,,,,24
