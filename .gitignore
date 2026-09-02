@@ -55,3 +55,8 @@ Argus/output/page_export/*
 
 # Logs
 *.log
+
+# Private FF development protocols
+Proto/FF_Constitution*.md
+Proto/FF_Dev_Workflow*.md
+Proto/*MVP開發原則*.md
