@@ -2,10 +2,10 @@
 
 FF is a video-to-page extraction project.
 
-## Current Milestone
+## Project Status
 
 ```text
-M2 | Automatic Page Extraction
+Completed | Desktop workflow available
 ```
 
 ## Current Runtime
